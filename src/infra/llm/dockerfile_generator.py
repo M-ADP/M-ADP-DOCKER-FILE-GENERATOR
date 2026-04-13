@@ -1,12 +1,12 @@
 import logging
+import re
 from typing import Callable
 
-from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
-from src.common.config.nova import NovaSettings
 from src.core.generators import BaseDockerfileGenerator
+from src.infra.llm.nova import NovaLLM
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,11 @@ SYSTEM_PROMPT = """당신은 Dockerfile 전문가입니다.
 - WORKDIR /app 고정
 - 비루트 사용자 설정
 - EXPOSE 포트 명시
-- Dockerfile 텍스트만 반환 (설명, 마크다운 코드블록 없이)"""
+
+출력 형식:
+- 응답은 반드시 FROM 명령어로 시작해야 합니다
+- 마크다운 코드 블록(```)을 절대 사용하지 마세요
+- 설명, 주석, 태그 없이 Dockerfile 내용만 출력하세요"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -35,13 +39,7 @@ read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽은 뒤, 
 
 class DockerfileGenerator(BaseDockerfileGenerator):
     def __init__(self) -> None:
-        settings = NovaSettings()
-        self.llm = ChatBedrockConverse(
-            model=settings.bedrock_model_id,
-            temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
-            region_name=settings.bedrock_region,
-        )
+        self.llm = NovaLLM()
 
     async def generate(
         self,
@@ -58,7 +56,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             logger.info(f"[DockerfileGenerator] read_file: {path}")
             return content
 
-        llm_with_tools = self.llm.bind_tools([read_file])
+        llm_with_tools = self.llm.client.bind_tools([read_file])
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=HUMAN_PROMPT.format(tree=tree, context=context)),
@@ -68,7 +66,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
     async def _run_agent(
         self,
-        llm_with_tools: ChatBedrockConverse,
+        llm_with_tools,
         read_file_tool: Callable,
         messages: list,
     ) -> str:
@@ -92,5 +90,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         if response is None or not response.content:
             raise ValueError("LLM returned empty response")
 
-        content = response.content
-        return content if isinstance(content, str) else str(content)
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        return self._clean(content)
+
+    @staticmethod
+    def _clean(content: str) -> str:
+        content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
+        content = re.sub(r"```[a-zA-Z]*\n?", "", content)
+        return content.strip()

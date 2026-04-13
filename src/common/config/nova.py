@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 class NovaSettings(BaseSettings):
-    bedrock_model_id: str = "apac.amazon.nova-pro-v1:0"
+    bedrock_model_id: str = "global.amazon.nova-2-lite-v1:0"
     bedrock_region: str = "ap-northeast-2"
     temperature: float = 0.7
     max_tokens: Optional[int] = None

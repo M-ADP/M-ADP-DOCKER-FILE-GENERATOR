@@ -7,7 +7,7 @@ from src.core.llm import LLM
 
 logger = logging.getLogger(__name__)
 
-BEDROCK_MODEL_ID = "apac.amazon.nova-pro-v1:0"
+BEDROCK_MODEL_ID = "global.amazon.nova-2-lite-v1:0"
 
 
 class NovaLLM(LLM):

@@ -1,4 +1,4 @@
-name: Deploy to Dev
+name: Deploy to Dev Serve
 
 on:
   push:
@@ -6,27 +6,27 @@ on:
       - 'dev-*' # dev-0.1.2 등 버전 브랜치 푸시 시 동작
 
 jobs:
-  call-dev:
+  call-dev-serve:
     permissions:
       contents: write
       packages: write
       pull-requests: write
-    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/dev.yaml@master
+    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/dev-serve.yaml@master
     with:
       deploy_repo: "M-ADP/M-ADP-ARGOCD"
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       PERSONAL_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
-      
+
   notify-slack:
-    needs: call-dev
+    needs: call-dev-serve
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Slack Notification
         run: |
-          STATUS="${{ needs.call-dev.result }}"
+          STATUS="${{ needs.call-dev-serve.result }}"
           if [ "$STATUS" = "success" ]; then
             COLOR="#2eb886"
             EMOJI="✅"

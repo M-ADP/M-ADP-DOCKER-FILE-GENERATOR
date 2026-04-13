@@ -23,6 +23,6 @@ async def generate(
     return PlainTextResponse(content=dockerfile, status_code=200)
 
 
-@router.get("/health")
+@router.get("/", tags=["default"])
 async def health():
     return {"status": "ok"}

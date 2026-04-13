@@ -22,11 +22,13 @@ SYSTEM_PROMPT = """당신은 Dockerfile 전문가입니다.
 - WORKDIR /app 고정
 - 비루트 사용자 설정
 - EXPOSE 포트 명시
+- COPY 명령어는 반드시 소스와 목적지 사이에 공백을 포함해야 합니다 (올바른 예: `COPY requirements.txt .`, `COPY . .`, `COPY package*.json ./`)
 
 출력 형식:
 - 응답은 반드시 FROM 명령어로 시작해야 합니다
 - 마크다운 코드 블록(```)을 절대 사용하지 마세요
-- 설명, 주석, 태그 없이 Dockerfile 내용만 출력하세요"""
+- # 로 시작하는 주석을 절대 포함하지 마세요
+- 설명, 주석, 태그 없이 순수한 Dockerfile 명령어만 출력하세요"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -97,4 +99,10 @@ class DockerfileGenerator(BaseDockerfileGenerator):
     def _clean(content: str) -> str:
         content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
         content = re.sub(r"```[a-zA-Z]*\n?", "", content)
+        # Remove comment lines (# ...)
+        content = re.sub(r"^\s*#.*\n?", "", content, flags=re.MULTILINE)
+        # Fix malformed COPY instructions: `COPY src.` or `COPY src./` → `COPY src .` or `COPY src ./`
+        content = re.sub(r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE)
+        # Collapse multiple blank lines into one
+        content = re.sub(r"\n{3,}", "\n\n", content)
         return content.strip()

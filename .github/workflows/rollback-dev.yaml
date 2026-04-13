@@ -1,0 +1,23 @@
+name: Rollback Dev Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Deploy version to restore (e.g. v1.0.0, hotfix-1)'
+        required: true
+        type: string
+
+jobs:
+  call-rollback:
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/rollback.yaml@master
+    with:
+      target_env: "dev"
+      target_version: ${{ inputs.version }}
+      deploy_repo: "M-ADP/M-ADP-ARGOCD"
+    secrets:
+      PERSONAL_TOKEN: ${{ secrets.PERSONAL_TOKEN }}

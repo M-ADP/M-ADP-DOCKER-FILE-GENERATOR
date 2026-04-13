@@ -5,18 +5,18 @@ from pathlib import Path
 
 from src.common.const.llm import MAX_FILE_CHARS
 from src.core.exceptions import InvalidArchiveError
+from src.core.guards import CompositeSecurityGuard
 
 logger = logging.getLogger(__name__)
 
 
 class SourceCollector:
+    def __init__(self, security_guard: CompositeSecurityGuard) -> None:
+        self.security_guard = security_guard
 
     def extract_store(self, tar_bytes: bytes) -> dict[str, str]:
-        """tar.gz에서 텍스트 파일을 추출해 {path: content} dict 반환.
+        self.security_guard.validate_tar(tar_bytes)
 
-        UTF-8 디코딩에 실패하는 파일(바이너리)은 자동 제외.
-        단일 파일이 MAX_FILE_CHARS 초과 시 잘라냄.
-        """
         try:
             with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
                 store: dict[str, str] = {}
@@ -28,8 +28,10 @@ class SourceCollector:
                     name = member.name.lstrip("./")
                     parts = Path(name).parts
 
-                    # 숨김 디렉토리 제외 (.git 등)
                     if any(p.startswith(".") for p in parts[:-1]):
+                        continue
+
+                    if member.issym() or member.islnk():
                         continue
 
                     f = tar.extractfile(member)
@@ -40,11 +42,12 @@ class SourceCollector:
                     try:
                         content = raw.decode("utf-8", errors="strict")
                     except (UnicodeDecodeError, ValueError):
-                        continue  # 바이너리 파일 제외
+                        continue
 
                     if len(content) > MAX_FILE_CHARS:
                         content = content[:MAX_FILE_CHARS] + "\n... (truncated)"
 
+                    self.security_guard.validate_source(content, name)
                     store[name] = content
 
                 logger.info(f"[SourceCollector] extracted {len(store)} files")

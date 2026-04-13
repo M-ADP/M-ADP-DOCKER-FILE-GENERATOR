@@ -6,9 +6,12 @@ from src.app.base_usecase import BaseUseCase
 from src.core.agents.priority_analysis import PriorityAnalysisAgent
 from src.core.exceptions import DockerfileGenerationError, NoSourceFilesError
 from src.core.generators import BaseDockerfileGenerator
+from src.core.guards import CompositeSecurityGuard
 from src.core.source.collector import SourceCollector
+from src.deps.get_composite_guard import get_composite_guard
 from src.deps.get_dockerfile_generator import get_dockerfile_generator
 from src.deps.get_priority_agent import get_priority_agent
+from src.deps.get_source_collector import get_source_collector
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +21,12 @@ MAX_CONTEXT_FILES = 20
 class GenerateDockerfileUseCase(BaseUseCase):
     def __init__(
         self,
-        collector: SourceCollector = Depends(SourceCollector),
+        security_guard: CompositeSecurityGuard = Depends(get_composite_guard),
+        collector: SourceCollector = Depends(get_source_collector),
         priority_agent: PriorityAnalysisAgent = Depends(get_priority_agent),
         generator: BaseDockerfileGenerator = Depends(get_dockerfile_generator),
     ):
+        self.security_guard = security_guard
         self.collector = collector
         self.priority_agent = priority_agent
         self.generator = generator
@@ -50,6 +55,7 @@ class GenerateDockerfileUseCase(BaseUseCase):
 
         try:
             result = await self.generator.generate(store, tree, context)
+            self.security_guard.validate_dockerfile(result)
         except Exception as e:
             raise DockerfileGenerationError() from e
 

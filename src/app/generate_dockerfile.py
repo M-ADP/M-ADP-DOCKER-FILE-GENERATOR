@@ -1,43 +1,55 @@
 import logging
-from typing import List
 
 from fastapi import Depends
-from langchain_core.runnables import Runnable
 
 from src.app.base_usecase import BaseUseCase
+from src.core.agents.priority_analysis import PriorityAnalysisAgent
 from src.core.exceptions import DockerfileGenerationError, NoSourceFilesError
+from src.core.generators import BaseDockerfileGenerator
 from src.core.source.collector import SourceCollector
-from src.core.source.model import SourceFile
-from src.deps.get_chain import get_chain
+from src.deps.get_dockerfile_generator import get_dockerfile_generator
+from src.deps.get_priority_agent import get_priority_agent
 
 logger = logging.getLogger(__name__)
 
-
-def _format_source_code(files: List[SourceFile]) -> str:
-    parts = [f"=== {f.path} ===\n{f.content}" for f in files]
-    return "\n\n".join(parts)
+MAX_CONTEXT_FILES = 20
 
 
 class GenerateDockerfileUseCase(BaseUseCase):
-
     def __init__(
         self,
-        chain: Runnable = Depends(get_chain),
         collector: SourceCollector = Depends(SourceCollector),
+        priority_agent: PriorityAnalysisAgent = Depends(get_priority_agent),
+        generator: BaseDockerfileGenerator = Depends(get_dockerfile_generator),
     ):
-        self.chain = chain
         self.collector = collector
+        self.priority_agent = priority_agent
+        self.generator = generator
 
     async def __call__(self, tar_bytes: bytes) -> str:
-        files = self.collector.collect(tar_bytes)  # InvalidArchiveError 그대로 전파
-        if not files:
+        store = self.collector.extract_store(tar_bytes)
+        if not store:
             raise NoSourceFilesError()
 
-        source_code = _format_source_code(files)
-        logger.info(f"[GenerateDockerfile] files={len(files)}, chars={len(source_code)}")
+        tree = self.collector.build_tree(store)
+        priority_paths = self.priority_agent.get_priority_paths(store, max_priority=3)
+
+        context_parts: list[str] = []
+        for path in priority_paths[:MAX_CONTEXT_FILES]:
+            content = store.get(path)
+            if content:
+                context_parts.append(f"=== {path} ===\n{content}")
+
+        context = ""
+        if context_parts:
+            context = "[우선순위 높은 파일들]\n" + "\n\n".join(context_parts)
+
+        logger.info(
+            f"[GenerateDockerfile] files={len(store)}, priority_files={len(priority_paths)}"
+        )
 
         try:
-            result = await self.chain.ainvoke({"source_code": source_code})
+            result = await self.generator.generate(store, tree, context)
         except Exception as e:
             raise DockerfileGenerationError() from e
 

@@ -1,61 +1,25 @@
 import io
 import logging
-import os
 import tarfile
 from pathlib import Path
-from typing import List
 
-from src.common.const.llm import MAX_CONTEXT_CHARS, MAX_FILE_CHARS
+from src.common.const.llm import MAX_FILE_CHARS
 from src.core.exceptions import InvalidArchiveError
-from src.core.source.model import SourceFile
 
 logger = logging.getLogger(__name__)
-
-_LANGUAGE_DETECTION_FILES = frozenset({
-    "package.json", "pom.xml", "build.gradle", "build.gradle.kts",
-    "requirements.txt", "go.mod", "Cargo.toml", "composer.json",
-    "Pipfile", "setup.py", "setup.cfg", "pyproject.toml",
-})
-
-_ENTRY_POINT_FILES = frozenset({
-    "main.py", "app.py", "server.py", "wsgi.py", "asgi.py",
-    "index.js", "app.js", "server.js",
-    "index.ts", "app.ts", "main.ts",
-    "main.go",
-    "Main.java", "Application.java",
-    "main.rs",
-    "manage.py",
-})
-
-_CONFIG_FILES = frozenset({
-    "application.yml", "application.yaml",
-    ".env.example", ".env.sample",
-    "config.yml", "config.yaml",
-    "nginx.conf",
-})
-
-_SOURCE_EXTENSIONS = frozenset({
-    ".py", ".js", ".ts", ".jsx", ".tsx",
-    ".java", ".kt", ".scala",
-    ".go",
-    ".rs",
-    ".rb", ".php",
-    ".cs", ".cpp", ".c", ".h", ".hpp",
-    ".yml", ".yaml", ".json", ".toml", ".xml", ".gradle",
-    ".sh", ".bash",
-})
 
 
 class SourceCollector:
 
-    def collect(self, tar_bytes: bytes) -> List[SourceFile]:
-        files = self._extract(tar_bytes)
-        return self._trim(files)
+    def extract_store(self, tar_bytes: bytes) -> dict[str, str]:
+        """tar.gz에서 텍스트 파일을 추출해 {path: content} dict 반환.
 
-    def _extract(self, tar_bytes: bytes) -> List[SourceFile]:
+        UTF-8 디코딩에 실패하는 파일(바이너리)은 자동 제외.
+        단일 파일이 MAX_FILE_CHARS 초과 시 잘라냄.
+        """
         try:
             with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
-                files: List[SourceFile] = []
+                store: dict[str, str] = {}
 
                 for member in tar.getmembers():
                     if not member.isfile():
@@ -64,59 +28,57 @@ class SourceCollector:
                     name = member.name.lstrip("./")
                     parts = Path(name).parts
 
+                    # 숨김 디렉토리 제외 (.git 등)
                     if any(p.startswith(".") for p in parts[:-1]):
-                        continue
-
-                    priority = self._priority(name)
-                    if priority == 99:
                         continue
 
                     f = tar.extractfile(member)
                     if f is None:
                         continue
 
+                    raw = f.read()
                     try:
-                        content = f.read().decode("utf-8", errors="replace")
-                    except Exception:
-                        continue
+                        content = raw.decode("utf-8", errors="strict")
+                    except (UnicodeDecodeError, ValueError):
+                        continue  # 바이너리 파일 제외
 
                     if len(content) > MAX_FILE_CHARS:
                         content = content[:MAX_FILE_CHARS] + "\n... (truncated)"
 
-                    files.append(SourceFile(path=name, content=content, priority=priority))
+                    store[name] = content
 
-                logger.info(f"[SourceCollector] extracted {len(files)} files")
-                return files
+                logger.info(f"[SourceCollector] extracted {len(store)} files")
+                return store
 
         except tarfile.TarError as e:
             raise InvalidArchiveError() from e
 
-    def _trim(self, files: List[SourceFile]) -> List[SourceFile]:
-        sorted_files = sorted(files, key=lambda f: (f.priority, f.path))
+    def build_tree(self, store: dict[str, str]) -> str:
+        """파일 경로 목록을 트리 형식 문자열로 변환.
 
-        total_chars = 0
-        result: List[SourceFile] = []
+        디렉토리를 파일보다 먼저 표시하며, 각 레벨은 알파벳 순 정렬.
+        """
+        tree: dict = {}
+        for path in sorted(store.keys()):
+            parts = Path(path).parts
+            node = tree
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node.setdefault(parts[-1], None)  # None = leaf(파일)
 
-        for f in sorted_files:
-            file_chars = len(f.content) + len(f.path) + 20
-            if total_chars + file_chars > MAX_CONTEXT_CHARS and f.priority >= 4:
-                logger.debug(f"[SourceCollector] skip {f.path} (context limit)")
-                continue
-            total_chars += file_chars
-            result.append(f)
+        lines: list[str] = []
 
-        logger.info(f"[SourceCollector] context={total_chars} chars, files={len(result)}")
-        return result
+        def _render(node: dict, prefix: str = "") -> None:
+            # 디렉토리 먼저, 그 다음 파일 (각각 알파벳 순)
+            items = sorted(node.items(), key=lambda x: (x[1] is None, x[0]))
+            for i, (name, children) in enumerate(items):
+                is_last = i == len(items) - 1
+                connector = "└── " if is_last else "├── "
+                display = f"{name}/" if children is not None else name
+                lines.append(f"{prefix}{connector}{display}")
+                if children is not None:
+                    extension = "    " if is_last else "│   "
+                    _render(children, prefix + extension)
 
-    @staticmethod
-    def _priority(filepath: str) -> int:
-        name = os.path.basename(filepath)
-        if name in _LANGUAGE_DETECTION_FILES:
-            return 1
-        if name in _ENTRY_POINT_FILES:
-            return 2
-        if name in _CONFIG_FILES:
-            return 3
-        if os.path.splitext(name)[1].lower() in _SOURCE_EXTENSIONS:
-            return 4
-        return 99
+        _render(tree)
+        return "\n".join(lines)

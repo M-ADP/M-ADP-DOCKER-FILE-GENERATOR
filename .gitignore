@@ -64,3 +64,5 @@ MANIFEST
 *.pid
 .claude
 .env
+
+agent

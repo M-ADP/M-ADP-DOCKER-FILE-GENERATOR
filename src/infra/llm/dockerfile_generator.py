@@ -30,10 +30,28 @@ Dockerfile을 작성하기 전에 read_file 도구로 의존성 파일(package.j
 - 런타임 의존성이 있으면 → runner 스테이지에 프로덕션 패키지 설치 필요
 
 **Q3. 컨테이너 시작 시 무엇을 실행하는가?**
-- 정적 파일이면: nginx 또는 정적 파일 서버(serve 등)로 서빙
+- 정적 파일이면: 반드시 `node:alpine + serve` 방식으로 서빙
+  - 올바른 패턴:
+    FROM node:22-alpine AS builder
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci
+    COPY . .
+    RUN npm run build
+    FROM node:22-alpine
+    WORKDIR /app
+    RUN npm install -g serve
+    COPY --from=builder /app/dist ./dist
+    EXPOSE 3000
+    CMD ["serve", "-s", "dist", "-l", "3000"]
+  - nginx 방식 사용 금지: nginx.conf 등 소스에 없는 파일을 COPY할 위험이 있음
 - 서버 프로세스이면: 실제 엔트리포인트 파일 경로를 확인 후 CMD 작성
   - package.json의 main/bin 필드 또는 scripts.start 참고
   - CMD에 명시한 파일이 빌드 결과물에 실제로 포함되는지 검증
+
+## 절대 금지: 소스에 없는 파일 COPY
+- Dockerfile에 COPY 명령어를 쓰기 전, 해당 파일이 소스 저장소에 실제로 존재하는지 read_file로 확인
+- 확인되지 않은 파일(nginx.conf, config.yml 등)을 COPY하면 빌드가 실패하므로 절대 포함하지 말 것
 
 ## 공통 규칙
 - 멀티스테이지 빌드 사용 (빌드 환경 ≠ 런타임 환경)

@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Any
 
 
 class BaseDockerfileGenerator(ABC):
@@ -9,5 +8,5 @@ class BaseDockerfileGenerator(ABC):
         store: dict[str, str],
         tree: str,
         context: str,
-    ) -> str:
+    ) -> tuple[str, int]:
         raise NotImplementedError

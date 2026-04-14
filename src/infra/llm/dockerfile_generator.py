@@ -53,6 +53,17 @@ Dockerfile을 작성하기 전에 read_file 도구로 의존성 파일(package.j
 - Dockerfile에 COPY 명령어를 쓰기 전, 해당 파일이 소스 저장소에 실제로 존재하는지 read_file로 확인
 - 확인되지 않은 파일(nginx.conf, config.yml 등)을 COPY하면 빌드가 실패하므로 절대 포함하지 말 것
 
+## 필수: 외부 접근 가능하도록 설정
+- **반드시 0.0.0.0으로 바인딩**: 서버 애플리케이션은 반드시 `0.0.0.0` 또는 `0.0.0.0:<port>`로 바인딩해야 함
+- **절대 localhost/127.0.0.1 사용 금지**: `localhost`, `127.0.0.1`은 컨테이너 내부에서만 접근 가능하므로 외부에서 연결할 수 없음
+- **Node.js**: `--host 0.0.0.0` 또는 `HOST=0.0.0.0` 환경변수 설정
+- **Python/Flask/FastAPI**: `host="0.0.0.0"` 설정
+- **Spring Boot**: `server.address=0.0.0.0` 설정
+- **Express.js**: `app.listen(PORT, '0.0.0.0')` 또는 `HOST=0.0.0.0` 환경변수
+- **Django**: `python manage.py runserver 0.0.0.0:8000`
+- **Go**: `http.ListenAndServe(":8080", handler)` (비어있는 호스트는 0.0.0.0 의미)
+- **Rust (Actix)**: `HttpServer::new(...).bind("0.0.0.0:8080")`
+
 ## 공통 규칙
 - 멀티스테이지 빌드 사용 (빌드 환경 ≠ 런타임 환경)
 - Alpine/Slim 경량 이미지 사용
@@ -86,7 +97,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         store: dict[str, str],
         tree: str,
         context: str,
-    ) -> str:
+    ) -> tuple[str, int]:
         @tool
         def read_file(path: str) -> str:
             """소스코드 파일의 내용을 읽습니다. path는 트리에 표시된 경로를 그대로 사용하세요."""
@@ -102,7 +113,16 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             HumanMessage(content=HUMAN_PROMPT.format(tree=tree, context=context)),
         ]
 
-        return await self._run_agent(llm_with_tools, read_file, messages)
+        dockerfile = await self._run_agent(llm_with_tools, read_file, messages)
+        port = self._extract_port(dockerfile)
+        return dockerfile, port
+
+    @staticmethod
+    def _extract_port(dockerfile: str) -> int:
+        match = re.search(r"EXPOSE\s+(\d+)", dockerfile)
+        if match:
+            return int(match.group(1))
+        return 8080
 
     async def _run_agent(
         self,
@@ -130,7 +150,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         if response is None or not response.content:
             raise ValueError("LLM returned empty response")
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        content = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
         return self._clean(content)
 
     @staticmethod
@@ -140,7 +164,9 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         # Remove comment lines (# ...)
         content = re.sub(r"^\s*#.*\n?", "", content, flags=re.MULTILINE)
         # Fix malformed COPY instructions: `COPY src.` or `COPY src./` → `COPY src .` or `COPY src ./`
-        content = re.sub(r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE)
+        content = re.sub(
+            r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE
+        )
         # Collapse multiple blank lines into one
         content = re.sub(r"\n{3,}", "\n\n", content)
         return content.strip()

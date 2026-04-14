@@ -31,7 +31,7 @@ class GenerateDockerfileUseCase(BaseUseCase):
         self.priority_agent = priority_agent
         self.generator = generator
 
-    async def __call__(self, tar_bytes: bytes) -> str:
+    async def __call__(self, tar_bytes: bytes) -> tuple[str, int]:
         store = self.collector.extract_store(tar_bytes)
         if not store:
             raise NoSourceFilesError()
@@ -54,9 +54,9 @@ class GenerateDockerfileUseCase(BaseUseCase):
         )
 
         try:
-            result = await self.generator.generate(store, tree, context)
+            result, port = await self.generator.generate(store, tree, context)
             self.security_guard.validate_dockerfile(result)
         except Exception as e:
             raise DockerfileGenerationError() from e
 
-        return result.strip()
+        return result.strip(), port

@@ -37,14 +37,25 @@ class DockerfileGenerationError(AppException):
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppException)
-    async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    async def app_exception_handler(
+        request: Request, exc: AppException
+    ) -> JSONResponse:
+        logger.error(
+            "AppException: %s | path=%s method=%s",
+            exc.message,
+            request.url.path,
+            request.method,
+            exc_info=exc,
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content={"message": exc.message},
         )
 
     @app.exception_handler(Exception)
-    async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    async def generic_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
         logger.error("Unhandled exception", exc_info=exc)
         return JSONResponse(
             status_code=500,

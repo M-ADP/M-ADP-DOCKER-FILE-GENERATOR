@@ -1,6 +1,5 @@
 import logging
 import re
-from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -15,55 +14,35 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ITERATIONS = 10
 
 STACK_PATTERNS = {
-    "node-react": {
+    # vite.config.* 또는 next.config.* 가 있으면 정적 빌드 프론트엔드로 확정
+    "node-static": {
         "detector": [
-            "package.json",
             "vite.config.js",
             "vite.config.ts",
             "next.config.js",
+            "next.config.ts",
+            "svelte.config.js",
+            "astro.config.js",
+            "astro.config.ts",
         ],
-        "builder_stage": "npm run build",
-        "runtime_base": "node:22-alpine",
-        "runtime_deps": "RUN npm install serve\nRUN npm ci --only=production",
-        "copy_dist": "COPY --from=builder /app/dist ./dist",
         "expose": "3000",
-        "cmd": "./node_modules/.bin/serve -s dist -l 3000",
+        "cmd": "serve -s dist -l 3000",
     },
-    "node-express": {
-        "detector": ["package.json", "server.js", "app.js", "index.js"],
-        "builder_stage": None,
-        "runtime_base": "node:22-alpine",
-        "runtime_deps": "RUN npm ci --only=production",
-        "copy_dist": None,
+    # server.js / app.js / index.js 가 루트에 있으면 Node 서버로 판단
+    "node-server": {
+        "detector": ["server.js", "app.js", "index.js"],
         "expose": "3000",
-        "cmd": "node server.js",
+        "cmd": None,  # 엔트리포인트는 LLM이 package.json main/scripts.start에서 확인
     },
     "python-fastapi": {
-        "detector": ["requirements.txt", "main.py", "app.py"],
-        "builder_stage": None,
-        "runtime_base": "python:3.12-slim",
-        "runtime_deps": "RUN pip install --no-cache-dir -r requirements.txt",
-        "copy_dist": None,
+        "detector": ["main.py"],
         "expose": "8000",
         "cmd": "uvicorn main:app --host 0.0.0.0 --port 8000",
     },
     "python-flask": {
-        "detector": ["requirements.txt", "app.py"],
-        "builder_stage": None,
-        "runtime_base": "python:3.12-slim",
-        "runtime_deps": "RUN pip install --no-cache-dir -r requirements.txt",
-        "copy_dist": None,
+        "detector": ["app.py"],
         "expose": "5000",
         "cmd": "flask run --host 0.0.0.0 --port 5000",
-    },
-    "static-html": {
-        "detector": ["index.html"],
-        "builder_stage": None,
-        "runtime_base": "nginx:alpine",
-        "runtime_deps": None,
-        "copy_dist": "COPY --from=builder /app/dist /usr/share/nginx/html",
-        "expose": "80",
-        "cmd": "nginx -g 'daemon off;'",
     },
 }
 
@@ -90,18 +69,19 @@ SYSTEM_PROMPT = """당신은 Dockerfile 전문가입니다.
 
 ## 스택별 규칙
 
-1. **Node.js (React, Express 등)**
-   - **절대 `npm install -g` 사용 금지** (npm v10 래퍼 스크립트 문제)
-   - 로컬 설치: `npm install <package>`
-   - 실행: `./node_modules/.bin/<cmd>`
+1. **Node.js 정적 빌드 (node-static)**
+   - runner: `node:22-alpine` + `RUN npm install -g serve`
+   - CMD: `serve -s dist -l 3000`
+   - nginx 사용 금지 (nginx.conf 등 소스에 없는 파일을 COPY할 위험)
+   - runner에서 `npm ci --production` 불필요
 
-2. **Python (FastAPI, Flask)**
-   - `pip install --no-cache-dir` 사용 (이미지 크기 최적화)
-   - uvicorn/flask 명령어에 `--host 0.0.0.0` 필수
+2. **Node.js 서버 (node-server)**
+   - runner에서 `npm ci --production` 필요
+   - CMD는 package.json의 main 또는 scripts.start를 read_file로 확인 후 결정
 
-3. **정적 파일 (HTML/CSS/JS)**
-   - nginx:alpine 사용
-   - 빌드 결과물을 `/usr/share/nginx/html`에 복사
+3. **Python (FastAPI, Flask)**
+   - `pip install --no-cache-dir` 사용
+   - 실행 명령어에 `--host 0.0.0.0` 필수
 
 ## 공통 규칙
 - 멀티스테이지 빌드 사용 (빌드 환경 ≠ 런타임 환경)
@@ -140,14 +120,30 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         return "\n".join(lines)
 
     def _build_detect_info(self, stack: Optional[str]) -> str:
-        if stack:
-            config = self.stack_patterns[stack]
-            return f"""감지된 스택: {stack}
-- EXPOSE: {config["expose"]}
-- CMD: {config["cmd"]}
+        if stack is None:
+            return "감지된 스택 없음. 파일을 직접 분석하여 적절한 Dockerfile을 생성하세요."
 
-스택 규칙을 반드시 준수하세요."""
-        return "스택이 감지되지 않았습니다. 일반적인 규칙을 적용하세요."
+        config = self.stack_patterns[stack]
+        lines = [f"감지된 스택: {stack}", f"- EXPOSE: {config['expose']}"]
+
+        if stack == "node-static":
+            lines += [
+                f"- CMD: {config['cmd']}",
+                "- 빌드: npm run build → dist/ 생성",
+                "- runner: node:22-alpine + serve (npm install -g serve)",
+                "- runner에서 npm ci --production 불필요",
+                "- nginx 사용 금지 (외부 설정 파일 의존성 위험)",
+            ]
+        elif stack == "node-server":
+            lines += [
+                "- CMD: package.json의 main 또는 scripts.start를 read_file로 확인 후 결정",
+                "- runner에서 npm ci --production 필요",
+            ]
+        elif config["cmd"]:
+            lines.append(f"- CMD: {config['cmd']}")
+
+        lines.append("\n위 규칙을 반드시 준수하세요.")
+        return "\n".join(lines)
 
     async def generate(
         self,

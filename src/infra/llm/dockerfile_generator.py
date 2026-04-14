@@ -160,6 +160,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
         @tool
         def read_file(path: str) -> str:
+            """소스코드 파일의 내용을 읽습니다. path는 트리에 표시된 경로를 그대로 사용하세요."""
             content = store.get(path)
             if content is None:
                 return f"[오류] 파일을 찾을 수 없습니다: {path}"

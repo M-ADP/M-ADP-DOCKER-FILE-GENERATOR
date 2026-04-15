@@ -151,6 +151,86 @@ def _sanitize_base_images(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+VALID_DOCKERFILE_INSTRUCTIONS = {
+    "FROM",
+    "RUN",
+    "CMD",
+    "COPY",
+    "ADD",
+    "ENV",
+    "EXPOSE",
+    "WORKDIR",
+    "USER",
+    "ARG",
+    "LABEL",
+    "VOLUME",
+    "MAINTAINER",
+    "ENTRYPOINT",
+    "ONBUILD",
+    "STOPSIGNAL",
+    "HEALTHCHECK",
+    "SHELL",
+}
+
+
+def _remove_invalid_lines(dockerfile: str) -> str:
+    """Dockerfile 명령어 형식에 맞지 않는 라인 제거"""
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append(line)
+            continue
+
+        # FROM 라인은 항상 유지
+        if stripped.startswith("FROM ") or stripped.startswith("FROM\t"):
+            result.append(line)
+            continue
+
+        # 다른 유효한 명령어 확인
+        first_word = stripped.split()[0].upper() if stripped.split() else ""
+
+        if first_word in VALID_DOCKERFILE_INSTRUCTIONS:
+            result.append(line)
+            continue
+
+        # 한글이 포함된 라인 제거
+        if re.search(r"[가-힣]", stripped):
+            logger.warning(f"[Dockerfile] Removed Korean line: {stripped[:50]}...")
+            continue
+
+        # 유효하지 않은 라인 제거
+        logger.warning(f"[Dockerfile] Removed invalid line: {stripped[:50]}...")
+
+    return "\n".join(result)
+
+
+def _ensure_from_first(dockerfile: str) -> str:
+    """Dockerfile의 첫 번째 라인이 FROM이어야 함"""
+    lines = dockerfile.split("\n")
+
+    # FROM 라인 찾기
+    from_line_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("FROM ") or stripped.startswith("FROM\t"):
+            from_line_idx = i
+            break
+
+    if from_line_idx is None:
+        logger.warning("[Dockerfile] No FROM instruction found")
+        return dockerfile
+
+    if from_line_idx == 0:
+        return dockerfile
+
+    # FROM 이전의 빈 라인 제외한 모든 라인 제거
+    logger.warning(f"[Dockerfile] Removed {from_line_idx} lines before FROM")
+    return "\n".join(lines[from_line_idx:])
+
+
 def _merge_env_layers(dockerfile: str) -> str:
     lines = dockerfile.split("\n")
     merged_lines: list[str] = []
@@ -679,4 +759,6 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         content = _merge_run_layers(content)
         content = _merge_env_layers(content)
         content = _sanitize_base_images(content)
+        content = _remove_invalid_lines(content)
+        content = _ensure_from_first(content)
         return content.strip()

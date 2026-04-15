@@ -5,6 +5,7 @@ from typing import Callable, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from src.core.generators import BaseDockerfileGenerator
 from src.infra.llm.docker_hub_verifier import DockerHubVerifier
@@ -531,27 +532,29 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         dockerignore = generate_dockerignore(store, stack)
         verifier = DockerHubVerifier()
 
-        @tool
+        # Pydantic schemas for structured tools
+        class ReadFileInput(BaseModel):
+            path: str = Field(
+                description="소스코드 파일의 경로. 트리에 표시된 경로를 그대로 사용하세요."
+            )
+
+        class VerifyDockerImageInput(BaseModel):
+            image_with_tag: str = Field(
+                description="Docker Hub에서 검증할 이미지 태그. 'image:tag' 형식 (예: 'node:22-alpine', 'python:3.12-slim')"
+            )
+
+        @tool(args_schema=ReadFileInput)
         def read_file(path: str) -> str:
-            """소스코드 파일의 내용을 읽습니다. path는 트리에 표시된 경로를 그대로 사용하세요."""
+            """소스코드 파일의 내용을 읽습니다."""
             content = store.get(path)
             if content is None:
                 return f"[오류] 파일을 찾을 수 없습니다: {path}"
             logger.info(f"[DockerfileGenerator] read_file: {path}")
             return content
 
-        @tool
+        @tool(args_schema=VerifyDockerImageInput)
         async def verify_docker_image(image_with_tag: str) -> str:
-            """Docker Hub에서 베이스 이미지 태그가 존재하는지 검증합니다.
-            image_with_tag는 'image:tag' 형식이어야 합니다. (예: 'node:22-alpine', 'python:3.12-slim')
-
-            Returns:
-            - 'EXISTS: image:tag - verified' if valid
-            - 'NOT_FOUND: image:tag - tag not found' if invalid
-            - 'ERROR: message' if API call failed
-
-            Note: openjdk:* 이미지는 더 이상 사용되지 않습니다. eclipse-temurin:* 사용하세요.
-            """
+            """Docker Hub에서 베이스 이미지 태그가 존재하는지 검증합니다."""
             parts = image_with_tag.split(":")
             if len(parts) != 2:
                 return (

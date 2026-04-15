@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
 from src.core.generators import BaseDockerfileGenerator
+from src.infra.llm.docker_hub_verifier import DockerHubVerifier
 from src.infra.llm.nova import NovaLLM
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,41 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
     return "\n".join(lines)
 
 
+def _is_known_image(image: str) -> bool:
+    for family_images in SUPPORTED_BASE_IMAGES.values():
+        if image in family_images.values():
+            return True
+    return False
+
+
+def _sanitize_base_images(dockerfile: str) -> str:
+    verifier = DockerHubVerifier()
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("FROM "):
+            result.append(line)
+            continue
+
+        rest = stripped[5:]
+        image = rest.split(" AS ")[0].split(" as ")[0].strip()
+        tag_lower = image.lower()
+
+        replacement = verifier.get_replacement(tag_lower)
+        if replacement:
+            new_line = line.replace(image, replacement)
+            logger.warning(
+                f"[BaseImage] deprecated image replaced: {image} -> {replacement}"
+            )
+            result.append(new_line)
+        else:
+            result.append(line)
+
+    return "\n".join(result)
+
+
 def _merge_env_layers(dockerfile: str) -> str:
     lines = dockerfile.split("\n")
     merged_lines: list[str] = []
@@ -166,7 +202,6 @@ def _merge_run_layers(dockerfile: str) -> str:
 
 
 STACK_PATTERNS = {
-    # vite.config.* 또는 next.config.* 가 있으면 정적 빌드 프론트엔드로 확정
     "node-static": {
         "detector": [
             "vite.config.js",
@@ -180,11 +215,10 @@ STACK_PATTERNS = {
         "expose": "3000",
         "cmd": "serve -s dist -l 3000",
     },
-    # server.js / app.js / index.js 가 루트에 있으면 Node 서버로 판단
     "node-server": {
         "detector": ["server.js", "app.js", "index.js"],
         "expose": "3000",
-        "cmd": None,  # 엔트리포인트는 LLM이 package.json main/scripts.start에서 확인
+        "cmd": None,
     },
     "python-fastapi": {
         "detector": ["main.py"],
@@ -195,6 +229,21 @@ STACK_PATTERNS = {
         "detector": ["app.py"],
         "expose": "5000",
         "cmd": "flask run --host 0.0.0.0 --port 5000",
+    },
+    "java-gradle": {
+        "detector": ["build.gradle", "build.gradle.kts"],
+        "expose": "8080",
+        "cmd": None,
+    },
+    "java-maven": {
+        "detector": ["pom.xml"],
+        "expose": "8080",
+        "cmd": None,
+    },
+    "go": {
+        "detector": ["go.mod"],
+        "expose": "8080",
+        "cmd": None,
     },
 }
 
@@ -295,6 +344,15 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 - Alpine 또는 Slim 베이스 이미지 사용 (node:22-alpine, python:3.12-slim 등)
 - 패키지 설치 후 캐시/임시 파일 정리를 RUN 명령어 내에서 즉시 수행
 
+### 5. 베이스 이미지 검증 (필수)
+- **openjdk 이미지 사용 금지** - Oracle 라이선스 정책 변경으로 Docker Hub에서 제거됨
+- **베이스 이미지는 반드시 검증 필요** - `verify_docker_image` 도구를 사용하여 Docker Hub에서 존재 여부 확인
+- **검증 방법**: FROM 이미지를 결정하기 전에 `verify_docker_image("image:tag")` 호출
+  - 결과가 "EXISTS"면 사용 가능
+  - 결과가 "NOT_FOUND"면 다른 태그나 이미지 검색
+- **Java가 필요한 경우**: `eclipse-temurin:17-jdk` 또는 `eclipse-temurin:21-jdk` 사용 (openjdk 대체)
+- **새로운 스택**: 검증된 이미지만 사용, 불확실하면 검색 도구 사용
+
 ## 스택 감지 및 템플릿 적용
 
 소스코드에서 스택을 감지하고, 해당하는 검증된 템플릿을 사용하세요.
@@ -337,7 +395,14 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 - 마크다운 코드 블록(```) 사용 금지
 - # 로 시작하는 주석 포함 금지
 - 설명 없이 순수한 Dockerfile 명령어만 출력
-- 각 스테이지는 `AS <name>`으로 명명"""
+- 각 스테이지는 `AS <name>`으로 명명
+
+## 절대 금지 사항
+- openjdk:* 이미지 사용 금지 → eclipse-temurin 사용
+- 분리된 RUN 명령어 금지 → 반드시 &&로 결합
+- 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
+- COPY . . 를 의존성 설치 전에 배치 금지
+- 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -347,7 +412,13 @@ HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
 {detect_info}
 
-read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽은 뒤, Dockerfile을 생성해주세요."""
+**도구 사용 순서**:
+1. read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽으세요
+2. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
+   - 예: verify_docker_image("node:22-alpine"), verify_docker_image("python:3.12-slim")
+   - EXISTS 결과를 받으면 해당 이미지를 FROM에 사용
+   - NOT_FOUND 결과를 받으면 다른 태그나 이미지를 검색
+3. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
 
 
 class DockerfileGenerator(BaseDockerfileGenerator):
@@ -415,6 +486,33 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "6. **레이어 결합 필수**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && find . -type d -name '__pycache__' -exec rm -rf {{}} + && find . -name '*.pyc' -delete && chown -R appuser:appgroup /app`",
                 "7. **비루트 사용자**: `USER appuser`",
             ]
+        elif stack and stack.startswith("java"):
+            lines += [
+                "- CMD: 빌드 결과 JAR 파일 실행 (read_file로 build.gradle/pom.xml 확인)",
+                "- **베이스 이미지 필수**: `FROM eclipse-temurin:17-jdk AS builder` (openjdk 사용 금지!)",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM eclipse-temurin:17-jdk AS builder`",
+                "2. **레이어 결합 필수**: `RUN ./gradlew build --no-daemon || mvn clean package`",
+                "3. **런타임 스테이지**: `FROM eclipse-temurin:17-jre` (JRE만 필요)",
+                "4. **JAR 복사**: `COPY --from=builder /app/build/libs/*.jar /app.jar`",
+                "5. **레이어 결합 필수**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app`",
+                "6. **비루트 사용자**: `USER appuser`",
+                "7. **CMD**: `CMD ['java', '-jar', '/app.jar']`",
+            ]
+        elif stack == "go":
+            lines += [
+                "- CMD: Go 바이너리 실행",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM golang:1.22-alpine AS builder`",
+                "2. **레이어 결합 필수**: `RUN apk add --no-cache git && go mod download && CGO_ENABLED=0 go build -o /app/main .`",
+                "3. **런타임 스테이지**: `FROM alpine:3.19`",
+                "4. **바이너리 복사**: `COPY --from=builder /app/main /app/main`",
+                "5. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
+                "6. **비루트 사용자**: `USER appuser`",
+                "7. **CMD**: `CMD ['/app/main']`",
+            ]
         elif config["cmd"]:
             lines.append(f"- CMD: {config['cmd']}")
 
@@ -431,6 +529,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         logger.info(f"[DockerfileGenerator] detected stack: {stack}")
 
         dockerignore = generate_dockerignore(store, stack)
+        verifier = DockerHubVerifier()
 
         @tool
         def read_file(path: str) -> str:
@@ -441,7 +540,35 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             logger.info(f"[DockerfileGenerator] read_file: {path}")
             return content
 
-        llm_with_tools = self.llm.client.bind_tools([read_file])
+        @tool
+        async def verify_docker_image(image_with_tag: str) -> str:
+            """Docker Hub에서 베이스 이미지 태그가 존재하는지 검증합니다.
+            image_with_tag는 'image:tag' 형식이어야 합니다. (예: 'node:22-alpine', 'python:3.12-slim')
+
+            Returns:
+            - 'EXISTS: image:tag - verified' if valid
+            - 'NOT_FOUND: image:tag - tag not found' if invalid
+            - 'ERROR: message' if API call failed
+
+            Note: openjdk:* 이미지는 더 이상 사용되지 않습니다. eclipse-temurin:* 사용하세요.
+            """
+            parts = image_with_tag.split(":")
+            if len(parts) != 2:
+                return (
+                    f"ERROR: Invalid format. Use 'image:tag' (e.g., 'node:22-alpine')"
+                )
+
+            image, tag = parts
+            result = await verifier.verify(image, tag)
+
+            if result["exists"]:
+                return f"EXISTS: {image_with_tag} - verified, size: {result.get('size', 'unknown')} bytes"
+            else:
+                error = result.get("error", "unknown")
+                suggestion = result.get("suggestion", "")
+                return f"NOT_FOUND: {image_with_tag} - {error}. {suggestion}"
+
+        llm_with_tools = self.llm.client.bind_tools([read_file, verify_docker_image])
         messages = [
             SystemMessage(
                 content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())
@@ -514,4 +641,5 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         content = re.sub(r"\n{3,}", "\n\n", content)
         content = _merge_run_layers(content)
         content = _merge_env_layers(content)
+        content = _sanitize_base_images(content)
         return content.strip()

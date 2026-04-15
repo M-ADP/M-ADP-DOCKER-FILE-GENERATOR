@@ -19,8 +19,10 @@ async def generate(
     if len(content) > MAX_FILE_SIZE:
         raise FileTooLargeError()
 
-    dockerfile, port = await use_case(content)
-    return DockerfileResponse(dockerfile=dockerfile, port=port)
+    dockerfile, dockerignore, port = await use_case(content)
+    return DockerfileResponse(
+        dockerfile=dockerfile, dockerignore=dockerignore, port=port
+    )
 
 
 @router.get("/", tags=["default"])

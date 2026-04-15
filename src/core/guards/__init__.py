@@ -118,3 +118,6 @@ class CompositeSecurityGuard:
 
     def validate_dockerfile(self, dockerfile: str) -> None:
         self.dockerfile_guard.validate(dockerfile)
+
+    def validate_dockerignore(self, dockerignore: str) -> None:
+        pass

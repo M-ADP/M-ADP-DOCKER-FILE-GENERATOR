@@ -13,6 +13,80 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
 
+DOCKERIGNORE_COMMON = [
+    ".git/",
+    ".github/",
+    ".gitignore",
+    ".env",
+    ".env.*",
+    "*.log",
+    "README.md",
+    ".idea/",
+    ".vscode/",
+    ".DS_Store",
+    "Thumbs.db",
+]
+
+DOCKERIGNORE_NODE = [
+    "node_modules/",
+    "dist/",
+    "build/",
+    ".cache/",
+    "coverage/",
+    ".eslintcache",
+    "*.tgz",
+    ".npm/",
+    ".yarn/",
+]
+
+DOCKERIGNORE_PYTHON = [
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "*.egg-info/",
+    "dist/",
+    "build/",
+    ".venv/",
+    "venv/",
+]
+
+
+def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
+    lines = list(DOCKERIGNORE_COMMON)
+
+    files = set(Path(p).name for p in store.keys())
+    dirs = set()
+    for p in store.keys():
+        parts = Path(p).parts
+        if len(parts) > 1:
+            dirs.update(parts[:-1])
+
+    if stack and stack.startswith("node"):
+        for pattern in DOCKERIGNORE_NODE:
+            lines.append(pattern)
+    elif stack and stack.startswith("python"):
+        for pattern in DOCKERIGNORE_PYTHON:
+            lines.append(pattern)
+    else:
+        if "node_modules" in dirs or "package.json" in files:
+            lines.extend(DOCKERIGNORE_NODE)
+        if (
+            "__pycache__" in dirs
+            or "requirements.txt" in files
+            or "pyproject.toml" in files
+        ):
+            lines.extend(DOCKERIGNORE_PYTHON)
+
+    if ".dockerignore" in files:
+        lines.insert(0, "# 기존 .dockerignore 참고하여 생성됨")
+
+    return "\n".join(lines)
+
+
 STACK_PATTERNS = {
     # vite.config.* 또는 next.config.* 가 있으면 정적 빌드 프론트엔드로 확정
     "node-static": {
@@ -245,9 +319,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         store: dict[str, str],
         tree: str,
         context: str,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, str, int]:
         stack = detect_stack(store)
         logger.info(f"[DockerfileGenerator] detected stack: {stack}")
+
+        dockerignore = generate_dockerignore(store, stack)
 
         @tool
         def read_file(path: str) -> str:
@@ -274,7 +350,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
         dockerfile = await self._run_agent(llm_with_tools, read_file, messages)
         port = self._extract_port(dockerfile, stack)
-        return dockerfile, port
+        return dockerfile, dockerignore, port
 
     @staticmethod
     def _extract_port(dockerfile: str, stack: Optional[str]) -> int:

@@ -8,5 +8,5 @@ class BaseDockerfileGenerator(ABC):
         store: dict[str, str],
         tree: str,
         context: str,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, str, int]:
         raise NotImplementedError

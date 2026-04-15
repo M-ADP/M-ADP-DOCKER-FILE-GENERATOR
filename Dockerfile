@@ -5,20 +5,27 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock ./
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv pip install --system --no-cache -r pyproject.toml && \
+    rm -rf ~/.cache/pip
 
 FROM python:3.12-slim
 
 WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Seoul
 
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 
 COPY . .
 
-ENV TZ=Asia/Seoul
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser && \
+    find . -type d -name "__pycache__" -exec rm -rf {} + && \
+    find . -name "*.pyc" -delete && \
+    chown -R appuser:appgroup /app
 
-RUN adduser --disabled-password --gecos '' appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000

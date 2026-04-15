@@ -17,26 +17,47 @@ DOCKERIGNORE_COMMON = [
     ".git/",
     ".github/",
     ".gitignore",
+    ".gitattributes",
     ".env",
     ".env.*",
     "*.log",
+    "*.log.*",
     "README.md",
+    "README.*",
+    "CHANGELOG.md",
+    "LICENSE",
+    "Makefile",
     ".idea/",
     ".vscode/",
+    ".sublime-project",
+    ".sublime-workspace",
     ".DS_Store",
     "Thumbs.db",
+    "*.swp",
+    "*.swo",
+    "*~",
+    ".claude/",
+    "*.md",
 ]
 
 DOCKERIGNORE_NODE = [
     "node_modules/",
     "dist/",
     "build/",
+    "out/",
     ".cache/",
+    ".next/",
+    ".nuxt/",
     "coverage/",
+    ".nyc_output/",
     ".eslintcache",
     "*.tgz",
+    "*.tar.gz",
     ".npm/",
     ".yarn/",
+    ".yarn-integrity",
+    "yarn.lock",
+    "package-lock.json",
 ]
 
 DOCKERIGNORE_PYTHON = [
@@ -47,11 +68,17 @@ DOCKERIGNORE_PYTHON = [
     ".pytest_cache/",
     ".mypy_cache/",
     ".ruff_cache/",
+    ".tox/",
     "*.egg-info/",
+    "*.egg",
     "dist/",
     "build/",
     ".venv/",
     "venv/",
+    "env/",
+    ".Python",
+    "pip-log.txt",
+    "pip-delete-this-directory.txt",
 ]
 
 
@@ -85,6 +112,57 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
         lines.insert(0, "# 기존 .dockerignore 참고하여 생성됨")
 
     return "\n".join(lines)
+
+
+def _merge_env_layers(dockerfile: str) -> str:
+    lines = dockerfile.split("\n")
+    merged_lines: list[str] = []
+    pending_envs: list[str] = []
+
+    def flush_envs():
+        if pending_envs:
+            merged_lines.append(f"ENV {' '.join(pending_envs)}")
+            pending_envs.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("ENV "):
+            pending_envs.append(stripped[4:])
+        else:
+            flush_envs()
+            merged_lines.append(line)
+
+    flush_envs()
+    return "\n".join(merged_lines)
+
+
+def _merge_run_layers(dockerfile: str) -> str:
+    lines = dockerfile.split("\n")
+    merged_lines: list[str] = []
+    pending_commands: list[str] = []
+
+    def flush_runs():
+        if pending_commands:
+            merged_lines.append("RUN " + " && \\\n    ".join(pending_commands))
+            pending_commands.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("FROM "):
+            flush_runs()
+            pending_commands.clear()
+            merged_lines.append(line)
+        elif stripped.startswith("RUN "):
+            cmd = stripped[4:]
+            if cmd.startswith("#"):
+                continue
+            pending_commands.append(cmd)
+        else:
+            flush_runs()
+            merged_lines.append(line)
+
+    flush_runs()
+    return "\n".join(merged_lines)
 
 
 STACK_PATTERNS = {
@@ -147,24 +225,80 @@ SYSTEM_PROMPT = """당신은 Dockerfile 최적화 전문가입니다.
 - 빌드 도구, 컴파일러, devDependencies는 최종 이미지에서 제외
 - `COPY --from=builder`로 빌드 결과만 복사
 
-### 3. 이미지 크기 최소화
-- Alpine 또는 Slim 베이스 이미지 사용 (node:22-alpine, python:3.12-slim 등)
-- RUN 명령어 결합 (`&&` 사용)으로 레이어 수 최소화
-- 패키지 설치 후 캐시/임시 파일 정리:
-  - npm: `npm cache clean --force && rm -rf /root/.npm`
-  - yarn: `yarn cache clean`
-  - pip: `rm -rf ~/.cache/pip`
-  - apt: `rm -rf /var/lib/apt/lists/*`
-- 불필요한 파일 제거: `find . -name "*.pyc" -delete`, `find . -type d -name "__pycache__" -exec rm -rf {{}} +`
+### 3. 레이어 수 최소화 (필수 준수 - 메모리 스파이크 방지)
+- **모든 RUN 명령어는 `&&`로 결합하여 하나의 레이어로 생성**
+- **install, build, cache clean을 하나의 RUN에 결합**
+- **ENV 명령어도 하나로 결합**: `ENV VAR1=val1 VAR2=val2`
+- **왜 필수인가**: 빌드 환경에서 Kaniko executor를 사용합니다. Kaniko는 RUN 명령이 끝날 때마다 전체 파일시스템 스냅샷을 뜹니다. `yarn install` 후 스냅샷 → 수만 개 파일 해싱으로 메모리 피크 발생 → `yarn build` 후 또 스냅샷 → 메모리 두 번 튐. 하나의 RUN으로 결합하면 중간 스냅샷을 생략하여 메모리 피크가 절반으로 줄어듭니다.
 
-### 4. 레이어 수 최소화
+#### Node.js 정적 빌드 예시
 ```dockerfile
-RUN apt-get update && apt-get install -y package-name && rm -rf /var/lib/apt/lists/*
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm
+COPY . .
+
+FROM node:22-alpine
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+RUN npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup
+ENV NODE_ENV=production
+USER appuser
+EXPOSE 3000
+CMD ["serve", "-s", "dist", "-l", "3000"]
 ```
+
+#### Node.js 서버 예시
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund && npm cache clean --force && rm -rf /root/.npm
+COPY . .
+
+FROM node:22-alpine
+WORKDIR /app
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/src ./src
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app
+ENV NODE_ENV=production
+USER appuser
+EXPOSE 3000
+CMD ["node", "src/index.js"]
+```
+
+#### Python 예시
+```dockerfile
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && rm -rf ~/.cache/pip
+COPY . .
+
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /app ./
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser && \
+    find . -type d -name '__pycache__' -exec rm -rf {{}} + && \
+    find . -name '*.pyc' -delete && \
+    chown -R appuser:appgroup /app
+USER appuser
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### 4. 이미지 크기 최소화
+- Alpine 또는 Slim 베이스 이미지 사용 (node:22-alpine, python:3.12-slim 등)
+- 패키지 설치 후 캐시/임시 파일 정리를 RUN 명령어 내에서 즉시 수행
 
 ## 스택 감지 및 템플릿 적용
 
 소스코드에서 스택을 감지하고, 해당하는 검증된 템플릿을 사용하세요.
+위 예시 템플릿을 참고하여 동일한 레이어 결합 패턴을 적용하세요.
 
 ### 지원 스택
 {stack_info}
@@ -172,64 +306,38 @@ RUN apt-get update && apt-get install -y package-name && rm -rf /var/lib/apt/lis
 ## 스택별 규칙
 
 1. **Node.js 정적 빌드 (node-static)**
-   - 빌드 스테이지: `node:22-alpine`
-   - runner: `node:22-alpine` + `RUN npm install -g serve`
-   - CMD: `serve -s dist -l 3000`
-   - nginx 사용 금지 (nginx.conf 등 소스에 없는 파일을 COPY할 위험)
-   - runner에서 `npm ci --production` 불필요 (정적 파일만 필요)
+   - 빌드 스테이지: npm ci + npm run build + cache clean을 하나의 RUN에 결합
+   - runner: serve 설치 + user 생성을 하나의 RUN에 결합
+   - nginx 사용 금지
 
 2. **Node.js 서버 (node-server)**
-   - 빌드 스테이지: `npm ci` (모든 의존성 설치)
-   - runner: `npm ci --production` (production 의존성만)
-   - CMD는 package.json의 main 또는 scripts.start를 read_file로 확인 후 결정
+   - 빌드 스테이지: npm ci + cache clean을 하나의 RUN에 결합
+   - runner: user 생성 + chown을 하나의 RUN에 결합
+   - CMD는 package.json의 main 또는 scripts.start를 read_file로 확인
 
 3. **Python (FastAPI, Flask)**
-   - `pip install --no-cache-dir` 사용
-   - 실행 명령어에 `--host 0.0.0.0` 필수
-   - 메모리 최적화 환경변수 설정
+   - 빌드 스테이지: pip install + cache clean을 하나의 RUN에 결합
+   - runner: user 생성 + pycache clean + chown을 하나의 RUN에 결합
+   - ENV는 한 줄로 결합: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`
 
 ## 공통 필수 규칙
-
-### 레이어 캐싱 최적화
-```
-# 올바른 순서 (의존성 파일 먼저)
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY . .
-```
-
-### 비루트 사용자 설정
-```
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-USER appuser
-```
 
 ### 보안 설정
 - WORKDIR /app 고정
 - EXPOSE 포트 명시
 - COPY 명령어는 소스와 목적지 사이에 공백 포함
+- 비루트 사용자 필수 설정
 
 ### 네트워크 안정성
-- `yarn install --network-timeout 100000`
 - `npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000`
-
-### 메모리 최적화
-- `npm ci --no-audit --no-fund` (audit/fund 출력 비활성화)
-- `yarn install --network-concurrency 1` (동시성 제한)
-- 빌드 완료 후 캐시 정리
-
-### Python 특화 최적화
-```
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-```
+- `yarn install --network-timeout 100000`
 
 ## 출력 형식
 - 응답은 반드시 FROM 명령어로 시작
 - 마크다운 코드 블록(```) 사용 금지
 - # 로 시작하는 주석 포함 금지
 - 설명 없이 순수한 Dockerfile 명령어만 출력
-- 각 스테이지는 `AS <name>`으로 명명 (예: `FROM node:22-alpine AS builder`)"""
+- 각 스테이지는 `AS <name>`으로 명명"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -266,47 +374,46 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             lines += [
                 f"- CMD: {config['cmd']}",
                 "- 빌드: `npm run build` (또는 yarn build) → dist/ 생성",
-                "- runner: node:22-alpine + serve (npm install -g serve)",
+                "- runner: node:22-alpine + serve",
                 "- runner에서 npm ci --production 불필요 (정적 파일만 필요)",
                 "- nginx 사용 금지 (외부 설정 파일 의존성 위험)",
                 "",
-                "**최적화 가이드:**",
+                "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **캐시 활용**: package.json 먼저 COPY 후 `npm ci --no-audit --no-fund`",
-                "3. **캐시 정리**: `npm cache clean --force && rm -rf /root/.npm`",
-                "4. **런타임 스테이지**: `FROM node:22-alpine`",
-                "5. **빌드 결과만 복사**: `COPY --from=builder /app/dist ./dist`",
-                "6. **serve 설치**: `RUN npm install -g serve`",
-                "7. **비루트 사용자**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && USER appuser`",
+                "2. **레이어 결합 필수**: package.json 먼저 COPY 후 `RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "3. **런타임 스테이지**: `FROM node:22-alpine`",
+                "4. **빌드 결과만 복사**: `COPY --from=builder /app/dist ./dist`",
+                "5. **레이어 결합 필수**: `RUN npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup`",
+                "6. **환경변수 결합**: `ENV NODE_ENV=production`",
+                "7. **비루트 사용자**: `USER appuser`",
             ]
         elif stack == "node-server":
             lines += [
                 "- CMD: package.json의 main 또는 scripts.start를 read_file로 확인 후 결정",
                 "- runner에서 npm ci --production (또는 yarn install --production) 필요",
                 "",
-                "**최적화 가이드:**",
+                "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **캐시 활용**: package.json 먼저 COPY 후 `npm ci --no-audit --no-fund`",
-                "3. **캐시 정리**: `npm cache clean --force && rm -rf /root/.npm`",
-                "4. **런타임 스테이지**: `FROM node:22-alpine`",
-                "5. **production 의존성만**: `COPY --from=builder /app/node_modules ./node_modules`",
-                "6. **소스 코드 복사**: `COPY --from=builder /app/src ./src` (또는 필요한 파일만)",
-                "7. **비루트 사용자**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && USER appuser`",
-                "8. **환경변수**: `ENV NODE_ENV=production`",
+                "2. **레이어 결합 필수**: `RUN npm ci --no-audit --no-fund && npm cache clean --force && rm -rf /root/.npm`",
+                "3. **런타임 스테이지**: `FROM node:22-alpine`",
+                "4. **production 의존성만**: `COPY --from=builder /app/node_modules ./node_modules`",
+                "5. **소스 코드 복사**: `COPY --from=builder /app/src ./src` (또는 필요한 파일만)",
+                "6. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
+                "7. **환경변수 결합**: `ENV NODE_ENV=production`",
+                "8. **비루트 사용자**: `USER appuser`",
             ]
         elif stack and stack.startswith("python"):
             lines += [
                 f"- CMD: {config['cmd']}",
                 "",
-                "**최적화 가이드:**",
+                "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM python:3.12-slim AS builder`",
-                "2. **캐시 활용**: requirements.txt 먼저 COPY 후 `pip install --no-cache-dir`",
-                "3. **캐시 정리**: `rm -rf ~/.cache/pip`",
-                "4. **런타임 스테이지**: `FROM python:3.12-slim`",
-                "5. **의존성 복사**: `COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages`",
-                "6. **메모리 최적화 환경변수**: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`",
-                "7. **바이트코드 정리**: `find . -name '*.pyc' -delete && find . -type d -name '__pycache__' -exec rm -rf {{}} +`",
-                "8. **비루트 사용자**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && USER appuser`",
+                "2. **레이어 결합 필수**: `RUN pip install --no-cache-dir -r requirements.txt && rm -rf ~/.cache/pip`",
+                "3. **런타임 스테이지**: `FROM python:3.12-slim`",
+                "4. **의존성 복사**: `COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages`",
+                "5. **환경변수 결합 필수**: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`",
+                "6. **레이어 결합 필수**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && find . -type d -name '__pycache__' -exec rm -rf {{}} + && find . -name '*.pyc' -delete && chown -R appuser:appgroup /app`",
+                "7. **비루트 사용자**: `USER appuser`",
             ]
         elif config["cmd"]:
             lines.append(f"- CMD: {config['cmd']}")
@@ -405,4 +512,6 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE
         )
         content = re.sub(r"\n{3,}", "\n\n", content)
+        content = _merge_run_layers(content)
+        content = _merge_env_layers(content)
         return content.strip()

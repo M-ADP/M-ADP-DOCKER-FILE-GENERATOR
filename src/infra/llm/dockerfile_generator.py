@@ -90,6 +90,9 @@ SYSTEM_PROMPT = """당신은 Dockerfile 전문가입니다.
 - 비루트 사용자 설정
 - EXPOSE 포트 명시
 - COPY 명령어는 소스와 목적지 사이에 공백 포함
+- **네트워크 안정성**:
+  - `yarn install` 사용 시 `--network-timeout 100000` 옵션 추가
+  - `npm install` 또는 `npm ci` 사용 시 `--fetch-retries=5 --fetch-retry-mintimeout=20000` 옵션 추가
 
 ## 출력 형식
 - 응답은 반드시 FROM 명령어로 시작
@@ -129,15 +132,17 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         if stack == "node-static":
             lines += [
                 f"- CMD: {config['cmd']}",
-                "- 빌드: npm run build → dist/ 생성",
+                "- 빌드: `npm run build` (또는 yarn build) → dist/ 생성",
                 "- runner: node:22-alpine + serve (npm install -g serve)",
                 "- runner에서 npm ci --production 불필요",
                 "- nginx 사용 금지 (외부 설정 파일 의존성 위험)",
+                "- **네트워크 안정성**: `yarn install --network-timeout 100000` 또는 `npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000` 필수 사용",
             ]
         elif stack == "node-server":
             lines += [
                 "- CMD: package.json의 main 또는 scripts.start를 read_file로 확인 후 결정",
-                "- runner에서 npm ci --production 필요",
+                "- runner에서 npm ci --production (또는 yarn install --production) 필요",
+                "- **네트워크 안정성**: `yarn install --network-timeout 100000` 또는 `npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000` 필수 사용",
             ]
         elif config["cmd"]:
             lines.append(f"- CMD: {config['cmd']}")

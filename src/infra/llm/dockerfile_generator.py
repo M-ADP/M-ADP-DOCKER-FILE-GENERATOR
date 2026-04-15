@@ -81,7 +81,7 @@ SYSTEM_PROMPT = """당신은 Dockerfile 최적화 전문가입니다.
   - yarn: `yarn cache clean`
   - pip: `rm -rf ~/.cache/pip`
   - apt: `rm -rf /var/lib/apt/lists/*`
-- 불필요한 파일 제거: `find . -name "*.pyc" -delete`, `find . -type d -name "__pycache__" -exec rm -rf {} +`
+- 불필요한 파일 제거: `find . -name "*.pyc" -delete`, `find . -type d -name "__pycache__" -exec rm -rf {{}} +`
 
 ### 4. 레이어 수 최소화
 ```dockerfile
@@ -231,7 +231,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "4. **런타임 스테이지**: `FROM python:3.12-slim`",
                 "5. **의존성 복사**: `COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages`",
                 "6. **메모리 최적화 환경변수**: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`",
-                "7. **바이트코드 정리**: `find . -name '*.pyc' -delete && find . -type d -name '__pycache__' -exec rm -rf {} +`",
+                "7. **바이트코드 정리**: `find . -name '*.pyc' -delete && find . -type d -name '__pycache__' -exec rm -rf {{}} +`",
                 "8. **비루트 사용자**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && USER appuser`",
             ]
         elif config["cmd"]:

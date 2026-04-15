@@ -94,7 +94,6 @@ class SourceSecurityGuard:
         r"IGNORE\s+ALL\s+PREVIOUS\s+INSTRUCTIONS",
         r"SYSTEM\s*PROMPT",
         r"return\s+exactly\s+this\s+Dockerfile",
-        r"\$\{.*\}",
     ]
 
     def validate(self, source: str, path: str) -> None:

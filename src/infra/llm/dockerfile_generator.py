@@ -585,7 +585,9 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             ),
         ]
 
-        dockerfile = await self._run_agent(llm_with_tools, read_file, messages)
+        dockerfile = await self._run_agent(
+            llm_with_tools, read_file, verify_docker_image, messages
+        )
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 
@@ -604,6 +606,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         self,
         llm_with_tools,
         read_file_tool: Callable,
+        verify_image_tool: Callable,
         messages: list,
     ) -> str:
         response = None
@@ -620,7 +623,38 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
             messages.append(response)
             for tc in response.tool_calls:
-                result = read_file_tool.invoke(tc["args"])
+                tool_name = tc.get("name", "")
+                tool_args = tc.get("args", {})
+
+                logger.info(
+                    f"[DockerfileGenerator] tool_call: {tool_name}({tool_args})"
+                )
+
+                try:
+                    if tool_name == "read_file":
+                        # Fallback: if image_with_tag is passed instead of path
+                        if "image_with_tag" in tool_args and "path" not in tool_args:
+                            logger.warning(
+                                f"[DockerfileGenerator] LLM confused parameters, "
+                                f"image_with_tag={tool_args['image_with_tag']} passed to read_file"
+                            )
+                            # Try to use it as path if it looks like a file path
+                            path_value = tool_args["image_with_tag"]
+                            if "/" in path_value or "." in path_value:
+                                result = read_file_tool.invoke({"path": path_value})
+                            else:
+                                result = f"[오류] read_file에는 파일 경로가 필요합니다. 받은 값: {path_value}"
+                        else:
+                            result = read_file_tool.invoke(tool_args)
+                    elif tool_name == "verify_docker_image":
+                        result = await verify_image_tool.invoke(tool_args)
+                    else:
+                        result = f"[오류] 알 수 없는 도구: {tool_name}"
+
+                except Exception as e:
+                    logger.error(f"[DockerfileGenerator] tool error: {e}")
+                    result = f"[오류] 도구 실행 실패: {e}"
+
                 messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
 
         if response is None or not response.content:

@@ -200,6 +200,75 @@ VALID_DOCKERFILE_INSTRUCTIONS = {
 }
 
 
+def _normalize_continuation_lines(dockerfile: str) -> str:
+    """RUN 명령어의 백슬래시 continuation을 단일 라인으로 정규화"""
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+    current_run: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("RUN "):
+            if current_run:
+                result.append("RUN " + " ".join(current_run))
+                current_run = []
+
+            cmd = stripped[4:]
+            if cmd.endswith("\\"):
+                cmd = cmd[:-1].rstrip()
+                current_run.append(cmd)
+            else:
+                result.append(line)
+        elif current_run:
+            if stripped and not stripped.startswith(
+                (
+                    "FROM ",
+                    "COPY ",
+                    "WORKDIR ",
+                    "ENV ",
+                    "EXPOSE ",
+                    "USER ",
+                    "CMD ",
+                    "ENTRYPOINT ",
+                    "#",
+                )
+            ):
+                if stripped.endswith("\\"):
+                    current_run.append(stripped[:-1].rstrip())
+                else:
+                    current_run.append(stripped)
+                    result.append("RUN " + " ".join(current_run))
+                    current_run = []
+            else:
+                if stripped.startswith(
+                    (
+                        "FROM ",
+                        "COPY ",
+                        "WORKDIR ",
+                        "ENV ",
+                        "EXPOSE ",
+                        "USER ",
+                        "CMD ",
+                        "ENTRYPOINT ",
+                    )
+                ):
+                    result.append("RUN " + " ".join(current_run))
+                    current_run = []
+                    result.append(line)
+                else:
+                    result.append("RUN " + " ".join(current_run))
+                    current_run = []
+                    result.append(line)
+        else:
+            result.append(line)
+
+    if current_run:
+        result.append("RUN " + " ".join(current_run))
+
+    return "\n".join(result)
+
+
 def _remove_invalid_lines(dockerfile: str) -> str:
     """Dockerfile 명령어 형식에 맞지 않는 라인 제거"""
     lines = dockerfile.split("\n")
@@ -313,6 +382,7 @@ def _merge_run_layers(dockerfile: str) -> str:
 
     for line in lines:
         stripped = line.strip()
+
         if stripped.startswith("FROM "):
             flush_runs()
             pending_commands.clear()
@@ -321,13 +391,86 @@ def _merge_run_layers(dockerfile: str) -> str:
             cmd = stripped[4:]
             if cmd.startswith("#"):
                 continue
+            if cmd.endswith("\\"):
+                cmd = cmd[:-1].rstrip()
             pending_commands.append(cmd)
+        elif stripped and not stripped.startswith("#"):
+            stripped_lc = stripped.lower()
+            if "run " in stripped_lc and "\\" in stripped:
+                merged_lines.append(
+                    "# Skipping invalid line with backslash: " + stripped[:50]
+                )
+                continue
+            flush_runs()
+            merged_lines.append(line)
         else:
             flush_runs()
             merged_lines.append(line)
 
     flush_runs()
     return "\n".join(merged_lines)
+
+
+def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
+    """Dockerfile 문법 검증 - 문제 패턴 감지"""
+    issues = []
+    lines = dockerfile.split("\n")
+
+    in_continuation = False
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        if not stripped:
+            in_continuation = False
+            continue
+
+        if in_continuation:
+            if stripped.startswith(
+                (
+                    "FROM ",
+                    "COPY ",
+                    "WORKDIR ",
+                    "ENV ",
+                    "EXPOSE ",
+                    "USER ",
+                    "CMD ",
+                    "ENTRYPOINT ",
+                )
+            ):
+                issues.append(
+                    f"Line {i}: Dockerfile instruction appears inside RUN continuation context"
+                )
+                in_continuation = False
+            elif stripped.endswith("\\"):
+                continue
+            else:
+                in_continuation = False
+            continue
+
+        if stripped.startswith("RUN "):
+            if stripped.endswith("\\"):
+                in_continuation = True
+                continue
+            run_body = stripped[4:].rstrip()
+            if run_body.endswith("&&") or run_body.endswith("||"):
+                issues.append(
+                    f"Line {i}: RUN command ends with incomplete operator ({run_body[-2:]})"
+                )
+            if not run_body or run_body == "RUN":
+                issues.append(f"Line {i}: RUN command has empty body")
+
+        if stripped.startswith("FROM ") and i > 1:
+            prev_idx = i - 2
+            while prev_idx >= 0 and not lines[prev_idx].strip():
+                prev_idx -= 1
+            if prev_idx >= 0:
+                prev = lines[prev_idx].strip()
+                if prev.endswith("\\"):
+                    issues.append(
+                        f"Line {i}: FROM appears after RUN line ending with backslash"
+                    )
+
+    return len(issues) == 0, issues
 
 
 STACK_PATTERNS = {
@@ -977,6 +1120,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE
         )
         content = re.sub(r"\n{3,}", "\n\n", content)
+        content = _normalize_continuation_lines(content)
         content = _fix_wildcard_copy(content)
         content = _merge_run_layers(content)
         content = _merge_env_layers(content)
@@ -991,4 +1135,12 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             raise ValueError(
                 f"Dockerfile must start with FROM instruction. Got: {result[:100]}"
             )
+
+        # Dockerfile 문법 검증
+        is_valid, issues = _validate_dockerfile_syntax(result)
+        if not is_valid:
+            for issue in issues:
+                logger.error(f"[Dockerfile] Syntax issue: {issue}")
+            raise ValueError(f"Dockerfile has syntax errors: {'; '.join(issues[:3])}")
+
         return result

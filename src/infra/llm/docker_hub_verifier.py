@@ -17,6 +17,87 @@ DEPRECATED_IMAGES = {
     "openjdk": "eclipse-temurin:17-jdk",
 }
 
+LANGUAGE_TO_IMAGE = {
+    "python": ("python", "3.12-slim"),
+    "node": ("node", "22-alpine"),
+    "nodejs": ("node", "22-alpine"),
+    "javascript": ("node", "22-alpine"),
+    "typescript": ("node", "22-alpine"),
+    "java": ("eclipse-temurin", "17-jdk"),
+    "kotlin": ("eclipse-temurin", "17-jdk"),
+    "go": ("golang", "1.22-alpine"),
+    "golang": ("golang", "1.22-alpine"),
+    "rust": ("rust", "1.75-slim"),
+    "ruby": ("ruby", "3.3-slim"),
+    "php": ("php", "8.2-fpm"),
+    "dotnet": ("mcr.microsoft.com/dotnet/sdk", "8.0"),
+    "csharp": ("mcr.microsoft.com/dotnet/sdk", "8.0"),
+    "c#": ("mcr.microsoft.com/dotnet/sdk", "8.0"),
+    "elixir": ("elixir", "1.16-otp-26"),
+    "erlang": ("erlang", "26"),
+    "scala": ("eclipse-temurin", "17-jdk"),
+    "clojure": ("clojure", "latest"),
+    "swift": ("swift", "5.9"),
+    "dart": ("dart", "3.2"),
+    "flutter": ("ghcr.io/nextevo/flutter", "latest"),
+    "perl": ("perl", "5.40-slim"),
+    "lua": ("lua", "5.4"),
+    "haskell": ("haskell", "9.6"),
+    "c": ("gcc", "13"),
+    "c++": ("gcc", "13"),
+    "cpp": ("gcc", "13"),
+    "zig": ("zig", "0.12"),
+    "nim": ("nimrod", "2.0"),
+    "crystal": ("crystal", "1.11"),
+    "deno": ("deno", "1.40"),
+    "bun": ("oven/bun", "1.0"),
+    "r": ("r-base", "4.3"),
+    "julia": ("julia", "1.10"),
+    "kotlin": ("eclipse-temurin", "17-jdk"),
+    "groovy": ("gradle", "8.5"),
+}
+
+# 파일 패턴에서 언어 추론
+FILE_PATTERN_TO_LANGUAGE = {
+    "Cargo.toml": "rust",
+    "Gemfile": "ruby",
+    "composer.json": "php",
+    "go.mod": "go",
+    "pom.xml": "java",
+    "build.gradle": "java",
+    "build.gradle.kts": "kotlin",
+    "*.csproj": "dotnet",
+    "*.sln": "dotnet",
+    "mix.exs": "elixir",
+    "Package.swift": "swift",
+    "pubspec.yaml": "dart",
+    "CMakeLists.txt": "c++",
+    "Makefile": "c",
+    "setup.py": "python",
+    "pyproject.toml": "python",
+    "requirements.txt": "python",
+    "package.json": "node",
+    "*.rs": "rust",
+    "*.rb": "ruby",
+    "*.php": "php",
+    "*.go": "go",
+    "*.java": "java",
+    "*.kt": "kotlin",
+    "*.cs": "dotnet",
+    "*.ex": "elixir",
+    "*.swift": "swift",
+    "*.dart": "dart",
+    "*.c": "c",
+    "*.cpp": "c++",
+    "*.h": "c++",
+    "*.zig": "zig",
+    "*.nim": "nim",
+    "*.cr": "crystal",
+    "*.r": "r",
+    "*.jl": "julia",
+    "*.clj": "clojure",
+}
+
 
 class DockerHubVerifier:
     def __init__(self) -> None:
@@ -65,3 +146,25 @@ class DockerHubVerifier:
     def is_deprecated(self, image: str) -> bool:
         """폐기된 이미지인지 확인"""
         return image.lower() in DEPRECATED_IMAGES
+
+    def suggest_image(self, language: str) -> Optional[str]:
+        """언어 이름으로 권장 이미지 제안"""
+        lang_lower = language.lower()
+        if lang_lower in LANGUAGE_TO_IMAGE:
+            image, tag = LANGUAGE_TO_IMAGE[lang_lower]
+            return f"{image}:{tag}"
+        return None
+
+    def detect_language_from_files(self, files: set[str]) -> Optional[str]:
+        """파일 목록에서 언어 추론"""
+        for pattern, lang in FILE_PATTERN_TO_LANGUAGE.items():
+            if pattern.startswith("*."):
+                # 확장자 패턴
+                ext = pattern[1:]  # "*.rs" -> ".rs"
+                if any(f.endswith(ext) for f in files):
+                    return lang
+            else:
+                # 정확한 파일명 패턴
+                if pattern in files:
+                    return lang
+        return None

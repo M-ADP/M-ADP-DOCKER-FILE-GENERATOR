@@ -583,7 +583,46 @@ CMD ["java", "-jar", "/app.jar"]
   - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
   - 와일드카드를 단일 파일에 복사하면 Docker/Kaniko 에러 발생
   - 빌드 단계에서 `cp build/libs/*-SNAPSHOT.jar /app.jar`로 단일 파일 복사 후
-    `COPY --from=builder /app.jar /app.jar` 사용"""
+    `COPY --from=builder /app.jar /app.jar` 사용
+
+## 알 수 없는 스택 처리 (필수)
+
+감지된 스택이 없거나 생소한 스택인 경우, 다음 프로세스를 반드시 따르세요:
+
+### 1단계: 패키지 매니저/빌드 파일 분석
+read_file로 다음 파일들을 순서대로 확인:
+- **패키지 매니저**: package.json, requirements.txt, Cargo.toml, Gemfile, pom.xml, build.gradle, go.mod, pyproject.toml, composer.json, mix.exs, pubspec.yaml, Package.swift, *.csproj, CMakeLists.txt
+- **진입점**: main.py, main.go, main.rs, Main.cs, index.js, app.rb, index.php, server.js, app.js, server.py, lib/main.ex, web/main.go
+- 분석 결과로 어떤 언어/프레임워크인지 추론
+
+### 2단계: 베이스 이미지 검색 및 검증
+- `search_docker_image` 도구로 해당 언어의 권장 이미지를 검색
+- 검색 결과를 받은 후 `verify_docker_image`로 존재 여부 최종 검증
+- EXISTS 확인 후 FROM에 사용
+
+### 3단계: Dockerfile 구조 결정
+언어별 기본 구조:
+
+| 언어 | 베이스 이미지 | 의존성 설치 | 빌드 | 실행 |
+|------|-------------|------------|------|------|
+| Rust | rust:1.75-slim | cargo build --release | 멀티스테이지 필수 | COPY binary → alpine/debian |
+| Ruby | ruby:3.3-slim | bundle install | 보통 불필요 | ruby app.rb |
+| PHP | php:8.2-fpm | composer install | 보통 불필요 | php-fpm 또는 artisan serve |
+| Elixir | elixir:1.16-otp-26 | mix deps.get + mix compile | 멀티스테이지 권장 | mix phx.server |
+| .NET | mcr.microsoft.com/dotnet/sdk:8.0 | dotnet restore | dotnet publish | COPY publish → runtime 이미지 |
+| Swift | swift:5.9 | swift build | 멀티스테이지 필수 | COPY binary → slim |
+| Dart | dart:3.2 | dart pub get | dart compile exe | COPY binary → slim |
+| C/C++ | gcc:13 | make | 멀티스테이지 필수 | COPY binary → debian-slim |
+| Haskell | haskell:9.6 | cabal build | 멀티스테이지 필수 | COPY binary → debian-slim |
+| Zig | zig:0.12 | zig build | 멀티스테이지 권장 | COPY binary → alpine |
+| Go | golang:1.22-alpine | go mod download | 멀티스테이지 필수 | COPY binary → alpine |
+
+### 4단계: 공통 규칙 준수
+- 멀티스테이지 빌드: 컴파일/빌드가 필요한 언어는 반드시 적용
+- 레이어 결합: RUN 명령어는 &&로 결합
+- 비루트 사용자 설정 필수
+- EXPOSE 포트 명시 (기본 8080, 프레임워크별 다를 수 있음)
+- ENTRYPOINT 또는 CMD로 실행 명령 지정"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -595,11 +634,12 @@ HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
 **도구 사용 순서**:
 1. read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽으세요
-2. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
+2. **(스택을 알 수 없을 때)**: search_docker_image 언어명)으로 권장 이미지 검색
+3. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
    - 예: verify_docker_image("node:22-alpine"), verify_docker_image("python:3.12-slim")
    - EXISTS 결과를 받으면 해당 이미지를 FROM에 사용
    - NOT_FOUND 결과를 받으면 다른 태그나 이미지를 검색
-3. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
+4. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
 
 
 class DockerfileGenerator(BaseDockerfileGenerator):
@@ -736,6 +776,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 description="Docker Hub에서 검증할 이미지 태그. 'image:tag' 형식 (예: 'node:22-alpine', 'python:3.12-slim')"
             )
 
+        class SearchDockerImageInput(BaseModel):
+            language: str = Field(
+                description="검색할 프로그래밍 언어 이름 (예: 'rust', 'ruby', 'php', 'elixir', 'swift', 'dart', 'kotlin')"
+            )
+
         @tool(args_schema=ReadFileInput)
         def read_file(path: str) -> str:
             """소스코드 파일의 내용을 읽습니다."""
@@ -764,7 +809,23 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 suggestion = result.get("suggestion", "")
                 return f"NOT_FOUND: {image_with_tag} - {error}. {suggestion}"
 
-        llm_with_tools = self.llm.client.bind_tools([read_file, verify_docker_image])
+        @tool(args_schema=SearchDockerImageInput)
+        def search_docker_image(language: str) -> str:
+            """프로그래밍 언어에 대한 권장 베이스 이미지를 검색합니다."""
+            suggested = verifier.suggest_image(language)
+            if suggested:
+                return f"SUGGESTED: {suggested} - 검색된 언어: {language}. 이제 verify_docker_image('{suggested}')로 검증하세요."
+            else:
+                detected = verifier.detect_language_from_files(set(store.keys()))
+                if detected:
+                    alt_suggested = verifier.suggest_image(detected)
+                    if alt_suggested:
+                        return f"SUGGESTED: {alt_suggested} - 파일 분석으로 언어 감지: {detected}. verify_docker_image('{alt_suggested}')로 검증하세요."
+                return f"NOT_FOUND: {language} - 지원하지 않는 언어입니다. 지원 언어: python, node, java, go, rust, ruby, php, elixir, dotnet, swift, dart, kotlin, scala, clojure, perl, lua, haskell, c, c++, zig, nim, crystal, deno, bun, r, julia"
+
+        llm_with_tools = self.llm.client.bind_tools(
+            [read_file, verify_docker_image, search_docker_image]
+        )
         messages = [
             SystemMessage(
                 content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())
@@ -779,7 +840,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         ]
 
         dockerfile = await self._run_agent_with_retry(
-            llm_with_tools, read_file, verify_docker_image, messages
+            llm_with_tools,
+            read_file,
+            verify_docker_image,
+            search_docker_image,
+            messages,
         )
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
@@ -800,6 +865,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         llm_with_tools,
         read_file_tool: Callable,
         verify_image_tool: Callable,
+        search_image_tool: Callable,
         messages: list,
     ) -> str:
         last_error = None
@@ -807,7 +873,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         for attempt in range(MAX_AGENT_RETRIES):
             try:
                 result = await self._run_agent(
-                    llm_with_tools, read_file_tool, verify_image_tool, messages
+                    llm_with_tools,
+                    read_file_tool,
+                    verify_image_tool,
+                    search_image_tool,
+                    messages,
                 )
                 return result
             except ValueError as e:
@@ -832,6 +902,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         llm_with_tools,
         read_file_tool: Callable,
         verify_image_tool: Callable,
+        search_image_tool: Callable,
         messages: list,
     ) -> str:
         response = None
@@ -873,6 +944,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                             result = read_file_tool.invoke(tool_args)
                     elif tool_name == "verify_docker_image":
                         result = await verify_image_tool.invoke(tool_args)
+                    elif tool_name == "search_docker_image":
+                        result = search_image_tool.invoke(tool_args)
                     else:
                         result = f"[오류] 알 수 없는 도구: {tool_name}"
 

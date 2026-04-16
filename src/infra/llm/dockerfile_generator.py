@@ -572,7 +572,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                     elif tool_name == "list_tree":
                         result = list_tree_tool.invoke(tool_args)
                     elif tool_name == "verify_docker_image":
-                        result = await verify_image_tool.invoke(tool_args)
+                        result = await verify_image_tool.ainvoke(tool_args)
                     elif tool_name == "search_docker_image":
                         result = search_image_tool.invoke(tool_args)
                     else:

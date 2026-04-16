@@ -2,7 +2,10 @@ import re
 from typing import Optional
 
 from src.infra.llm.dockerfile_processing.constants import NEXT_ROUTE_DIRS
-from src.infra.llm.dockerfile_processing.copy import _parse_copy_instruction, _parse_copy_sources
+from src.infra.llm.dockerfile_processing.copy import (
+    _parse_copy_instruction,
+    _parse_copy_sources,
+)
 from src.infra.llm.dockerfile_processing.paths import _normalize_source_path
 
 
@@ -21,19 +24,22 @@ def _is_node_build_command(line: str) -> bool:
 
 def _copy_includes_application_source(line: str) -> bool:
     sources = _parse_copy_sources(line)
+    known_source_dirs = {
+        "src",
+        "app",
+        "pages",
+        "components",
+        "public",
+    }
     for source in sources:
         normalized = _normalize_source_path(source)
         if normalized in {".", ""}:
             return True
-        if normalized.rstrip("/") in {
-            "src",
-            "app",
-            "pages",
-            "components",
-            "public",
-        }:
+        if normalized.rstrip("/") in known_source_dirs:
             return True
         if normalized.startswith(("src/", "app/", "pages/", "components/", "public/")):
+            return True
+        if "/" in normalized and not normalized.startswith("."):
             return True
     return False
 

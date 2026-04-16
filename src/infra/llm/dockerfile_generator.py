@@ -279,6 +279,27 @@ def _merge_env_layers(dockerfile: str) -> str:
     return "\n".join(merged_lines)
 
 
+def _fix_wildcard_copy(dockerfile: str) -> str:
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if re.search(r"COPY\s+--from=\S+\s+\S*\*\.\w+\s+\S+[^/]$", stripped):
+            match = re.match(
+                r"(\s*COPY\s+--from=\S+\s+)(\S+/\*\.\w+)(\s+)(\S+)",
+                stripped,
+            )
+            if match:
+                prefix, src, space, dest = match.groups()
+                logger.warning(
+                    f"[Dockerfile] Wildcard COPY to non-directory fixed: {stripped}"
+                )
+                result.append(f"{prefix}{src}{space}{dest}/")
+                continue
+        result.append(line)
+    return "\n".join(result)
+
+
 def _merge_run_layers(dockerfile: str) -> str:
     lines = dockerfile.split("\n")
     merged_lines: list[str] = []
@@ -459,11 +480,11 @@ COPY gradle/ gradle/
 COPY gradlew build.gradle settings.gradle ./
 RUN chmod +x gradlew && ./gradlew build --no-daemon
 COPY src/ src/
-RUN ./gradlew build --no-daemon
+RUN ./gradlew build --no-daemon && cp build/libs/*-SNAPSHOT.jar /app.jar
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=builder /app/build/libs/*.jar /app.jar
+COPY --from=builder /app.jar /app.jar
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 8080
@@ -477,11 +498,11 @@ WORKDIR /app
 COPY pom.xml ./
 RUN mvn dependency:go-offline
 COPY src/ src/
-RUN mvn clean package -DskipTests
+RUN mvn clean package -DskipTests && cp target/*.jar /app.jar
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=builder /app/target/*.jar /app.jar
+COPY --from=builder /app.jar /app.jar
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 8080
@@ -556,7 +577,12 @@ CMD ["java", "-jar", "/app.jar"]
 - 분리된 RUN 명령어 금지 → 반드시 &&로 결합
 - 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
 - COPY . . 를 의존성 설치 전에 배치 금지
-- 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정"""
+- 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정
+- **Java JAR 와일드카드 금지**: `COPY --from=builder /app/build/libs/*.jar /app.jar` 금지
+  - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
+  - 와일드카드를 단일 파일에 복사하면 Docker/Kaniko 에러 발생
+  - 빌드 단계에서 `cp build/libs/*-SNAPSHOT.jar /app.jar`로 단일 파일 복사 후
+    `COPY --from=builder /app.jar /app.jar` 사용"""
 
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
@@ -647,12 +673,19 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM eclipse-temurin:17-jdk AS builder`",
-                "2. **레이어 결합 필수**: `RUN ./gradlew build --no-daemon || mvn clean package`",
+                "2. **레이어 결합 필수**: `RUN ./gradlew build --no-daemon && cp build/libs/*-SNAPSHOT.jar /app.jar` (Gradle)",
+                "   또는 `RUN mvn clean package -DskipTests && cp target/*.jar /app.jar` (Maven)",
                 "3. **런타임 스테이지**: `FROM eclipse-temurin:17-jre` (JRE만 필요)",
-                "4. **JAR 복사**: `COPY --from=builder /app/build/libs/*.jar /app.jar`",
+                "4. **JAR 복사**: `COPY --from=builder /app.jar /app.jar`",
                 "5. **레이어 결합 필수**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app`",
                 "6. **비루트 사용자**: `USER appuser`",
                 "7. **CMD**: `CMD ['java', '-jar', '/app.jar']`",
+                "",
+                "**절대 주의: JAR 파일 복사 방식**",
+                "- Gradle 빌드는 -plain.jar와 실행 가능한 JAR 2개를 생성합니다.",
+                "- `COPY --from=builder /app/build/libs/*.jar /app.jar` 사용 금지!",
+                "- 와일드카드(*.jar)로 여러 파일을 단일 파일명(/app.jar)에 복사하면 Docker/Kaniko 에러 발생.",
+                "- 빌드 스테이지에서 `cp`로 단일 파일로 먼저 복사한 후, `COPY --from=builder /app.jar /app.jar` 사용.",
                 "",
                 "**중요: .dockerignore 규칙**",
                 "- gradle/wrapper/gradle-wrapper.jar 파일은 빌드에 필수입니다.",
@@ -835,6 +868,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             r"(COPY\s+\S+)\.([ \t]*/|[ \t]*$)", r"\1 .\2", content, flags=re.MULTILINE
         )
         content = re.sub(r"\n{3,}", "\n\n", content)
+        content = _fix_wildcard_copy(content)
         content = _merge_run_layers(content)
         content = _merge_env_layers(content)
         content = _sanitize_base_images(content)

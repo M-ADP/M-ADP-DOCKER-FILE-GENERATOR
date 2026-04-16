@@ -167,6 +167,66 @@ def _is_available_source(path: str, available_paths: set[str]) -> bool:
     return normalized in normalized_available_paths
 
 
+def _resolve_store_path(store: dict[str, str], path: str) -> Optional[str]:
+    normalized = _normalize_source_path(path)
+    normalized_paths = {
+        _normalize_source_path(store_path): store_path for store_path in store.keys()
+    }
+    if normalized in normalized_paths:
+        return normalized_paths[normalized]
+
+    matches = [
+        store_path
+        for store_path in store.keys()
+        if Path(_normalize_source_path(store_path)).name == normalized
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def _build_tree_from_store(
+    store: dict[str, str],
+    path: str = "",
+    max_depth: int = 3,
+) -> str:
+    root = _normalize_source_path(path)
+    max_depth = max(1, min(max_depth, 8))
+    entries: set[tuple[str, bool]] = set()
+
+    for store_path in store.keys():
+        normalized = _normalize_source_path(store_path)
+        if root:
+            if normalized == root:
+                entries.add((Path(normalized).name, False))
+                continue
+            prefix = f"{root}/"
+            if not normalized.startswith(prefix):
+                continue
+            relative = normalized[len(prefix) :]
+        else:
+            relative = normalized
+
+        parts = [part for part in Path(relative).parts if part]
+        for depth, part in enumerate(parts[:max_depth], 1):
+            is_file = depth == len(parts)
+            display = "/".join(parts[:depth])
+            entries.add((display, is_file))
+
+    if not entries:
+        return f"[오류] 디렉토리 또는 파일을 찾을 수 없습니다: {path or '.'}"
+
+    lines = [f"{root or '.'}/"]
+    for entry, is_file in sorted(entries):
+        depth = len(Path(entry).parts)
+        indent = "  " * depth
+        suffix = "" if is_file else "/"
+        lines.append(f"{indent}{Path(entry).name}{suffix}")
+
+    return "\n".join(lines)
+
+
 def _parse_copy_sources(line: str) -> list[str]:
     stripped = line.strip()
     if not stripped.startswith("COPY ") or "--from=" in stripped:
@@ -672,12 +732,69 @@ def _merge_run_layers(dockerfile: str) -> str:
     return "\n".join(merged_lines)
 
 
+def _is_node_build_command(line: str) -> bool:
+    stripped = line.strip().lower()
+    if not stripped.startswith("run "):
+        return False
+
+    return bool(
+        re.search(
+            r"\b(npm\s+run\s+build|yarn\s+build|pnpm\s+build|bun\s+run\s+build|next\s+build)\b",
+            stripped,
+        )
+    )
+
+
+def _copy_includes_application_source(line: str) -> bool:
+    sources = _parse_copy_sources(line)
+    for source in sources:
+        normalized = _normalize_source_path(source)
+        if normalized in {".", ""}:
+            return True
+        if normalized.rstrip("/") in {
+            "src",
+            "app",
+            "pages",
+            "components",
+            "public",
+        }:
+            return True
+        if normalized.startswith(("src/", "app/", "pages/", "components/", "public/")):
+            return True
+    return False
+
+
+def _logical_dockerfile_lines(dockerfile: str) -> list[tuple[int, str]]:
+    logical_lines: list[tuple[int, str]] = []
+    current = ""
+    start_line = 1
+
+    for line_no, line in enumerate(dockerfile.split("\n"), 1):
+        stripped = line.strip()
+        if not current:
+            start_line = line_no
+
+        if stripped.endswith("\\"):
+            current += stripped[:-1].rstrip() + " "
+            continue
+
+        current += stripped
+        logical_lines.append((start_line, current.strip()))
+        current = ""
+
+    if current:
+        logical_lines.append((start_line, current.strip()))
+
+    return logical_lines
+
+
 def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
     """Dockerfile 문법 검증 - 문제 패턴 감지"""
     issues = []
     lines = dockerfile.split("\n")
 
     in_continuation = False
+    has_application_source_copy = False
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
 
@@ -720,7 +837,12 @@ def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
             if not run_body or run_body == "RUN":
                 issues.append(f"Line {i}: RUN command has empty body")
 
+        if stripped.startswith("COPY ") and "--from=" not in stripped:
+            if _copy_includes_application_source(stripped):
+                has_application_source_copy = True
+
         if stripped.startswith("FROM ") and i > 1:
+            has_application_source_copy = False
             prev_idx = i - 2
             while prev_idx >= 0 and not lines[prev_idx].strip():
                 prev_idx -= 1
@@ -730,6 +852,19 @@ def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
                     issues.append(
                         f"Line {i}: FROM appears after RUN line ending with backslash"
                     )
+
+    has_application_source_copy = False
+    for line_no, logical_line in _logical_dockerfile_lines(dockerfile):
+        if logical_line.startswith("FROM "):
+            has_application_source_copy = False
+            continue
+        if logical_line.startswith("COPY ") and "--from=" not in logical_line:
+            if _copy_includes_application_source(logical_line):
+                has_application_source_copy = True
+        if _is_node_build_command(logical_line) and not has_application_source_copy:
+            issues.append(
+                f"Line {line_no}: Node/Next build runs before application source COPY"
+            )
 
     return len(issues) == 0, issues
 
@@ -906,8 +1041,8 @@ SYSTEM_PROMPT = """당신은 Dockerfile 최적화 전문가입니다.
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm
 COPY . .
+RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm
 
 FROM node:22-alpine
 WORKDIR /app
@@ -924,8 +1059,8 @@ CMD ["serve", "-s", "dist", "-l", "3000"]
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund && npm cache clean --force && rm -rf /root/.npm
 COPY . .
+RUN npm ci --no-audit --no-fund && npm cache clean --force && rm -rf /root/.npm
 
 FROM node:22-alpine
 WORKDIR /app
@@ -1053,6 +1188,12 @@ CMD ["java", "-jar", "/app.jar"]
 - package.json, package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb 등 의존성 설치에 필요한 파일은 실제 존재하는 파일만 COPY하세요.
 - npm/yarn/pnpm/bun lockfile을 한 줄에 모두 나열하지 마세요. 저장소에 있는 package manager의 lockfile만 선택하세요.
 
+### Node/Next.js 빌드 순서
+- `npm run build`, `yarn build`, `pnpm build`, `next build`는 애플리케이션 소스 COPY 이후에 실행해야 합니다.
+- `COPY package.json <lockfile> ./`만 한 뒤 build를 실행하면 Next.js가 app/pages/src/app 디렉토리를 찾지 못합니다.
+- Next.js는 반드시 list_tree로 `app/`, `pages/`, `src/app/`, `src/pages/` 위치를 확인하고, 빌드 전에 해당 소스가 컨테이너에 복사되도록 Dockerfile을 작성하세요.
+- package.json이 루트가 아닌 하위 디렉토리에 있으면, 해당 디렉토리를 프로젝트 루트로 보고 `COPY <하위경로>/package.json ... ./`, `COPY <하위경로>/ ./` 형태로 작성하세요.
+
 ### 보안 설정
 - WORKDIR /app 고정
 - EXPOSE 포트 명시
@@ -1074,7 +1215,7 @@ CMD ["java", "-jar", "/app.jar"]
 - openjdk:* 이미지 사용 금지 → eclipse-temurin 사용
 - 분리된 RUN 명령어 금지 → 반드시 &&로 결합
 - 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
-- COPY . . 를 의존성 설치 전에 배치 금지
+- Node/Next.js에서 build를 애플리케이션 소스 COPY 전에 실행 금지
 - 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정
 - **Java JAR 와일드카드 금지**: `COPY --from=builder /app/build/libs/*.jar /app.jar` 금지
   - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
@@ -1086,14 +1227,16 @@ CMD ["java", "-jar", "/app.jar"]
 
 **주의: 시스템이 감지한 스택 정보는 참고용입니다. 반드시 직접 파일을 읽어 검증하세요.**
 
-1. 감지된 스택이 표시되더라도, 반드시 `read_file`로 패키지 매니저 파일(package.json, build.gradle 등)을 읽어 확인
-2. package.json의 dependencies를 확인하여 프레임워크(next, react, vue, express 등) 식별
-3. 감지된 스택과 실제 파일 내용이 다르면 **실제 파일 내용을 우선**
-4. 특히 주의:
+1. 감지된 스택이 표시되더라도, 반드시 `list_tree`로 실제 디렉토리 구조를 확인
+2. 반드시 `read_file`로 패키지 매니저 파일(package.json, build.gradle 등)을 읽어 확인
+3. package.json의 dependencies를 확인하여 프레임워크(next, react, vue, express 등) 식별
+4. 감지된 스택과 실제 파일 내용이 다르면 **실제 파일 내용을 우선**
+5. 특히 주의:
    - Next.js 프로젝트: package.json에 "next" 의존성 + next.config.* 파일 존재
+   - Next.js 라우트 디렉토리: `app/`, `pages/`, `src/app/`, `src/pages/` 중 실제 존재하는 경로를 list_tree로 확인
    - Spring Boot 프로젝트: build.gradle에 "spring-boot" 플러그인 + src/main/java 디렉토리
    - Flask/FastAPI: requirements.txt에 flask/fastapi 포함
-   - 반드시 read_file로 확인 후 판단
+   - 반드시 list_tree와 read_file로 확인 후 판단
 
 ## 알 수 없는 스택 처리 (필수)
 
@@ -1143,13 +1286,14 @@ HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 {detect_info}
 
 **도구 사용 순서**:
-1. read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽으세요
-2. **(스택을 알 수 없을 때)**: search_docker_image 언어명)으로 권장 이미지 검색
-3. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
+1. list_tree 도구로 실제 프로젝트 루트와 src/app, app, pages 등 주요 디렉토리 위치를 확인하세요
+2. read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽으세요
+3. **(스택을 알 수 없을 때)**: search_docker_image 언어명)으로 권장 이미지 검색
+4. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
    - 예: verify_docker_image("node:22-alpine"), verify_docker_image("python:3.12-slim")
    - EXISTS 결과를 받으면 해당 이미지를 FROM에 사용
    - NOT_FOUND 결과를 받으면 다른 태그나 이미지를 검색
-4. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
+5. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
 
 
 class DockerfileGenerator(BaseDockerfileGenerator):
@@ -1191,18 +1335,21 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "   - yarn.lock이 있으면 yarn 사용: `COPY package.json yarn.lock ./`",
                 "   - pnpm-lock.yaml이 있으면 pnpm 사용: `COPY package.json pnpm-lock.yaml ./`",
                 "   - 존재하지 않는 lockfile을 COPY에 포함하지 마세요.",
-                "3. **레이어 결합 필수**: package manager에 맞춰 install/build/cache clean을 한 RUN에 결합",
+                "3. **소스 복사 필수**: `COPY . .` 또는 실제 app/pages/src 경로를 build 전에 COPY",
+                "   - list_tree로 `app/`, `pages/`, `src/app/`, `src/pages/` 중 실제 존재하는 경로를 확인",
+                "   - `COPY package.json yarn.lock ./` 직후 build 실행 금지",
+                "4. **레이어 결합 필수**: package manager에 맞춰 install/build/cache clean을 한 RUN에 결합",
                 "   - npm: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
                 "   - yarn: `RUN yarn install --frozen-lockfile && yarn build && yarn cache clean`",
-                "4. **런타임 스테이지**: `FROM node:22-alpine`",
-                "5. **복사**: `COPY --from=builder /app/.next ./.next`",
+                "5. **런타임 스테이지**: `FROM node:22-alpine`",
+                "6. **복사**: `COPY --from=builder /app/.next ./.next`",
                 "   `COPY --from=builder /app/public ./public`",
                 "   `COPY --from=builder /app/node_modules ./node_modules`",
                 "   `COPY --from=builder /app/package.json ./package.json`",
-                "6. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
-                "7. **환경변수 결합**: `ENV NODE_ENV=production`",
-                "8. **비루트 사용자**: `USER appuser`",
-                "9. **CMD**: `CMD ['npm', 'start']` 또는 `CMD ['yarn', 'start']`",
+                "7. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
+                "8. **환경변수 결합**: `ENV NODE_ENV=production`",
+                "9. **비루트 사용자**: `USER appuser`",
+                "10. **CMD**: `CMD ['npm', 'start']` 또는 `CMD ['yarn', 'start']`",
             ]
         elif stack == "nuxt":
             lines += [
@@ -1210,7 +1357,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "2. **소스 복사 필수**: build 실행 전에 `COPY . .`",
+                "3. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
                 "3. **런타임 스테이지**: `FROM node:22-alpine`",
                 "4. **복사**: `COPY --from=builder /app/.output ./.output`",
                 "5. **CMD**: `CMD ['node', '.output/server/index.mjs']`",
@@ -1222,7 +1370,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "2. **소스 복사 필수**: build 실행 전에 `COPY . .`",
+                "3. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
                 "3. **런타임 스테이지**: `FROM node:22-alpine`",
                 "4. **복사**: `COPY --from=builder /app/dist ./dist`",
                 "5. **serve 설치 + user**: `RUN npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup`",
@@ -1234,7 +1383,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "2. **소스 복사 필수**: build 실행 전에 `COPY . .`",
+                "3. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
                 "3. **런타임 스테이지**: `FROM node:22-alpine`",
                 "4. **복사**: `COPY --from=builder /app/dist ./dist`",
                 "5. **serve 설치**: `RUN npm install -g serve`",
@@ -1250,7 +1400,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **레이어 결합 필수**: package.json 먼저 COPY 후 `RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "2. **소스 복사 필수**: package.json/lockfile COPY 후, build 실행 전에 `COPY . .`",
+                "3. **레이어 결합 필수**: 소스 COPY 후 `RUN npm ci --no-audit --no-fund && npm run build && npm cache clean --force && rm -rf /root/.npm`",
                 "3. **런타임 스테이지**: `FROM node:22-alpine`",
                 "4. **빌드 결과만 복사**: `COPY --from=builder /app/dist ./dist`",
                 "5. **레이어 결합 필수**: `RUN npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup`",
@@ -1349,6 +1500,18 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 description="소스코드 파일의 경로. 트리에 표시된 경로를 그대로 사용하세요."
             )
 
+        class ListTreeInput(BaseModel):
+            path: str = Field(
+                default="",
+                description="조회할 디렉토리 경로. 루트는 빈 문자열 또는 '.'을 사용하세요.",
+            )
+            max_depth: int = Field(
+                default=3,
+                ge=1,
+                le=8,
+                description="조회할 최대 깊이. 기본값은 3입니다.",
+            )
+
         class VerifyDockerImageInput(BaseModel):
             image_with_tag: str = Field(
                 description="Docker Hub에서 검증할 이미지 태그. 'image:tag' 형식 (예: 'node:22-alpine', 'python:3.12-slim')"
@@ -1362,11 +1525,23 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         @tool(args_schema=ReadFileInput)
         def read_file(path: str) -> str:
             """소스코드 파일의 내용을 읽습니다."""
-            content = store.get(path)
+            resolved_path = _resolve_store_path(store, path)
+            content = store.get(resolved_path) if resolved_path else None
             if content is None:
                 return f"[오류] 파일을 찾을 수 없습니다: {path}"
-            logger.info(f"[DockerfileGenerator] read_file: {path}")
+            logger.info(f"[DockerfileGenerator] read_file: {resolved_path}")
             return content
+
+        @tool(args_schema=ListTreeInput)
+        def list_tree(path: str = "", max_depth: int = 3) -> str:
+            """소스코드 디렉토리 구조를 조회합니다."""
+            normalized_path = "" if path in ("", ".") else path
+            logger.info(
+                "[DockerfileGenerator] list_tree: path=%s, max_depth=%s",
+                normalized_path or ".",
+                max_depth,
+            )
+            return _build_tree_from_store(store, normalized_path, max_depth)
 
         @tool(args_schema=VerifyDockerImageInput)
         async def verify_docker_image(image_with_tag: str) -> str:
@@ -1402,7 +1577,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 return f"NOT_FOUND: {language} - 지원하지 않는 언어입니다. 지원 언어: python, node, java, go, rust, ruby, php, elixir, dotnet, swift, dart, kotlin, scala, clojure, perl, lua, haskell, c, c++, zig, nim, crystal, deno, bun, r, julia"
 
         llm_with_tools = self.llm.client.bind_tools(
-            [read_file, verify_docker_image, search_docker_image]
+            [read_file, list_tree, verify_docker_image, search_docker_image]
         )
         messages = [
             SystemMessage(
@@ -1420,6 +1595,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         dockerfile = await self._run_agent_with_retry(
             llm_with_tools,
             read_file,
+            list_tree,
             verify_docker_image,
             search_docker_image,
             messages,
@@ -1447,6 +1623,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         self,
         llm_with_tools,
         read_file_tool: Callable,
+        list_tree_tool: Callable,
         verify_image_tool: Callable,
         search_image_tool: Callable,
         messages: list,
@@ -1458,6 +1635,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 result = await self._run_agent(
                     llm_with_tools,
                     read_file_tool,
+                    list_tree_tool,
                     verify_image_tool,
                     search_image_tool,
                     messages,
@@ -1484,6 +1662,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         self,
         llm_with_tools,
         read_file_tool: Callable,
+        list_tree_tool: Callable,
         verify_image_tool: Callable,
         search_image_tool: Callable,
         messages: list,
@@ -1525,6 +1704,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                                 result = f"[오류] read_file에는 파일 경로가 필요합니다. 받은 값: {path_value}"
                         else:
                             result = read_file_tool.invoke(tool_args)
+                    elif tool_name == "list_tree":
+                        result = list_tree_tool.invoke(tool_args)
                     elif tool_name == "verify_docker_image":
                         result = await verify_image_tool.invoke(tool_args)
                     elif tool_name == "search_docker_image":

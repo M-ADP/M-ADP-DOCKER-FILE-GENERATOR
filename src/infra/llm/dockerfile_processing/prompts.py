@@ -140,6 +140,13 @@ CMD ["java", "-jar", "/app.jar"]
 
 ## 스택별 규칙
 
+### Node.js 패키지 매니저 사용 시 필수
+- **node:22-alpine에는 npm만 기본 설치됨** (yarn, pnpm, bun은 기본 설치되지 않음)
+- yarn.lock이 있으면: `RUN npm install -g yarn` 후 `yarn install ...`
+- pnpm-lock.yaml이 있으면: `RUN npm install -g pnpm` 후 `pnpm install ...`
+- bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install ...`
+- 명령어 실행 시 해당 패키지 매니저가 설치되어 있는지 확인하고, 없으면 설치 후 사용
+
 1. **Node.js 정적 빌드 (node-static)**
    - 빌드 스테이지: npm ci + npm run build + cache clean을 하나의 RUN에 결합
    - runner: serve 설치 + user 생성을 하나의 RUN에 결합

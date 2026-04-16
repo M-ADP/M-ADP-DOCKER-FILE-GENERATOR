@@ -26,7 +26,11 @@ from src.infra.llm.dockerfile_processing import (
     generate_dockerignore,
 )
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
-from src.infra.llm.dockerfile_processing.prompts import HUMAN_PROMPT, SYSTEM_PROMPT
+from src.infra.llm.dockerfile_processing.prompts import (
+    FEEDBACK_HUMAN_PROMPT,
+    HUMAN_PROMPT,
+    SYSTEM_PROMPT,
+)
 from src.infra.llm.nova import NovaLLM
 
 logger = logging.getLogger(__name__)
@@ -450,6 +454,165 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 
+    async def generate_with_feedback(
+        self,
+        store: dict[str, str],
+        tree: str,
+        context: str,
+        dockerfile: str,
+        dockerignore: str,
+        feedback: str,
+    ) -> tuple[str, str, int]:
+        stack = detect_stack(store)
+        logger.info(
+            f"[DockerfileGenerator] feedback mode, detected stack: {stack}, "
+            f"files={len(store)}"
+        )
+
+        verifier = DockerHubVerifier()
+
+        class ReadFileInput(BaseModel):
+            path: str = Field(
+                description="소스코드 파일의 경로. 트리에 표시된 경로를 그대로 사용하세요."
+            )
+
+        class ListTreeInput(BaseModel):
+            path: str = Field(
+                default="",
+                description="조회할 디렉토리 경로. 루트는 빈 문자열 또는 '.'을 사용하세요.",
+            )
+            max_depth: int = Field(
+                default=3,
+                ge=1,
+                le=8,
+                description="조회할 최대 깊이. 기본값은 3입니다.",
+            )
+
+        class VerifyDockerImageInput(BaseModel):
+            image_with_tag: str = Field(
+                description="Docker Hub에서 검증할 이미지 태그. 'image:tag' 형식 (예: 'node:22-alpine', 'python:3.12-slim')"
+            )
+
+        class SearchDockerImageInput(BaseModel):
+            language: str = Field(
+                description="검색할 프로그래밍 언어 이름 (예: 'rust', 'ruby', 'php', 'elixir', 'swift', 'dart', 'kotlin')"
+            )
+
+        @tool(args_schema=ReadFileInput)
+        def read_file(path: str) -> str:
+            """소스코드 파일의 내용을 읽습니다."""
+            resolved_path = _resolve_store_path(store, path)
+            content = store.get(resolved_path) if resolved_path else None
+            if content is None:
+                return f"[오류] 파일을 찾을 수 없습니다: {path}"
+            logger.info(f"[DockerfileGenerator] read_file: {resolved_path}")
+            return content
+
+        @tool(args_schema=ListTreeInput)
+        def list_tree(path: str = "", max_depth: int = 3) -> str:
+            """소스코드 디렉토리 구조를 조회합니다."""
+            normalized_path = "" if path in ("", ".") else path
+            logger.info(
+                "[DockerfileGenerator] list_tree: path=%s, max_depth=%s",
+                normalized_path or ".",
+                max_depth,
+            )
+            return _build_tree_from_store(store, normalized_path, max_depth)
+
+        @tool(args_schema=VerifyDockerImageInput)
+        async def verify_docker_image(image_with_tag: str) -> str:
+            """Docker Hub에서 베이스 이미지 태그가 존재하는지 검증합니다."""
+            parts = image_with_tag.split(":")
+            if len(parts) != 2:
+                return "ERROR: Invalid format. Use 'image:tag' (e.g., 'node:22-alpine')"
+
+            image, tag = parts
+            result = await verifier.verify(image, tag)
+
+            if result["exists"]:
+                return f"EXISTS: {image_with_tag} - verified, size: {result.get('size', 'unknown')} bytes"
+            else:
+                error = result.get("error", "unknown")
+                suggestion = result.get("suggestion", "")
+                return f"NOT_FOUND: {image_with_tag} - {error}. {suggestion}"
+
+        @tool(args_schema=SearchDockerImageInput)
+        def search_docker_image(language: str) -> str:
+            """프로그래밍 언어에 대한 권장 베이스 이미지를 검색합니다."""
+            suggested = verifier.suggest_image(language)
+            if suggested:
+                return f"SUGGESTED: {suggested} - 검색된 언어: {language}. 이제 verify_docker_image('{suggested}')로 검증하세요."
+            else:
+                detected = verifier.detect_language_from_files(set(store.keys()))
+                if detected:
+                    alt_suggested = verifier.suggest_image(detected)
+                    if alt_suggested:
+                        return f"SUGGESTED: {alt_suggested} - 파일 분석으로 언어 감지: {detected}. verify_docker_image('{alt_suggested}')로 검증하세요."
+                return f"NOT_FOUND: {language} - 지원하지 않는 언어입니다. 지원 언어: python, node, java, go, rust, ruby, php, elixir, dotnet, swift, dart, kotlin, scala, clojure, perl, lua, haskell, c, c++, zig, nim, crystal, deno, bun, r, julia"
+
+        llm_with_tools = self.llm.client.bind_tools(
+            [read_file, list_tree, verify_docker_image, search_docker_image]
+        )
+        messages = [
+            SystemMessage(
+                content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())
+            ),
+            HumanMessage(
+                content=FEEDBACK_HUMAN_PROMPT.format(
+                    tree=tree,
+                    context=context,
+                    detect_info=self._build_detect_info(stack),
+                    dockerfile=dockerfile,
+                    dockerignore=dockerignore,
+                    feedback=feedback,
+                )
+            ),
+        ]
+
+        new_dockerfile = await self._run_agent_with_retry(
+            llm_with_tools,
+            read_file,
+            list_tree,
+            verify_docker_image,
+            search_docker_image,
+            messages,
+            store,
+            stack,
+        )
+        new_dockerfile = _remove_missing_optional_copy_sources(new_dockerfile, store)
+        new_dockerignore = generate_dockerignore(store, stack, new_dockerfile)
+        port = self._extract_port(new_dockerfile, stack)
+        return new_dockerfile, new_dockerignore, port
+
+    @staticmethod
+    def _detect_stack_from_dockerfile(dockerfile: str) -> Optional[str]:
+        content = dockerfile.lower()
+        if "eclipse-temurin" in content or "openjdk" in content:
+            if "gradlew" in content or "gradle" in content:
+                return "java-gradle"
+            if "mvn" in content or "maven" in content or "pom.xml" in content:
+                return "java-maven"
+            return "java-gradle"
+        if "golang:" in content:
+            return "go"
+        if "python:" in content:
+            if "uvicorn" in content:
+                return "python-fastapi"
+            if "gunicorn" in content or "flask" in content:
+                return "python-flask"
+            return "python-fastapi"
+        if "node:" in content:
+            if "serve" in content or "/dist" in content:
+                if "next" in content or ".next" in content:
+                    return "nextjs"
+                if "nuxt" in content or ".output" in content:
+                    return "nuxt"
+                return "node-static"
+            return "node-server"
+        if "rust:" in content or "cargo" in content:
+            return "rust"
+        return None
+
     @staticmethod
     def _extract_port(dockerfile: str, stack: Optional[str]) -> int:
         match = re.search(r"EXPOSE\s+(\d+)", dockerfile)
@@ -471,6 +634,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         messages: list,
         store: dict[str, str],
         stack: Optional[str],
+        validate_source: bool = True,
     ) -> str:
         last_error = None
 
@@ -484,17 +648,18 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                     search_image_tool,
                     messages,
                 )
-                source_issues = _validate_dockerfile_against_source(
-                    result,
-                    store,
-                    stack,
-                )
-                if source_issues:
-                    for issue in source_issues:
-                        logger.error(f"[Dockerfile] Source issue: {issue}")
-                    raise ValueError(
-                        f"Dockerfile does not match source tree: {'; '.join(source_issues[:3])}"
+                if validate_source:
+                    source_issues = _validate_dockerfile_against_source(
+                        result,
+                        store,
+                        stack,
                     )
+                    if source_issues:
+                        for issue in source_issues:
+                            logger.error(f"[Dockerfile] Source issue: {issue}")
+                        raise ValueError(
+                            f"Dockerfile does not match source tree: {'; '.join(source_issues[:3])}"
+                        )
                 return result
             except ValueError as e:
                 last_error = e

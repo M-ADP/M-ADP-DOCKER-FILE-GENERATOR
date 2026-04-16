@@ -1,0 +1,73 @@
+import logging
+
+from fastapi import Depends
+
+from src.app.base_usecase import BaseUseCase
+from src.core.agents.priority_analysis import PriorityAnalysisAgent
+from src.core.exceptions import DockerfileGenerationError, NoSourceFilesError
+from src.core.generators import BaseDockerfileGenerator
+from src.core.guards import CompositeSecurityGuard
+from src.core.source.collector import SourceCollector
+from src.deps.get_composite_guard import get_composite_guard
+from src.deps.get_dockerfile_generator import get_dockerfile_generator
+from src.deps.get_priority_agent import get_priority_agent
+from src.deps.get_source_collector import get_source_collector
+
+logger = logging.getLogger(__name__)
+
+MAX_CONTEXT_FILES = 20
+
+
+class FeedbackDockerfileUseCase(BaseUseCase):
+    def __init__(
+        self,
+        security_guard: CompositeSecurityGuard = Depends(get_composite_guard),
+        collector: SourceCollector = Depends(get_source_collector),
+        priority_agent: PriorityAnalysisAgent = Depends(get_priority_agent),
+        generator: BaseDockerfileGenerator = Depends(get_dockerfile_generator),
+    ):
+        self.security_guard = security_guard
+        self.collector = collector
+        self.priority_agent = priority_agent
+        self.generator = generator
+
+    async def __call__(
+        self,
+        tar_bytes: bytes,
+        dockerfile: str,
+        dockerignore: str,
+        feedback: str,
+    ) -> tuple[str, str, int]:
+        store = self.collector.extract_store(tar_bytes)
+        if not store:
+            raise NoSourceFilesError()
+
+        tree = self.collector.build_tree(store)
+        priority_paths = self.priority_agent.get_priority_paths(store, max_priority=3)
+
+        context_parts: list[str] = []
+        for path in priority_paths[:MAX_CONTEXT_FILES]:
+            content = store.get(path)
+            if content:
+                context_parts.append(f"=== {path} ===\n{content}")
+
+        context = ""
+        if context_parts:
+            context = "[우선순위 높은 파일들]\n" + "\n\n".join(context_parts)
+
+        logger.info(
+            f"[FeedbackDockerfile] files={len(store)}, "
+            f"priority_files={len(priority_paths)}, "
+            f"feedback_length={len(feedback)}"
+        )
+
+        try:
+            result, new_dockerignore, port = await self.generator.generate_with_feedback(
+                store, tree, context, dockerfile, dockerignore, feedback
+            )
+            self.security_guard.validate_dockerfile(result)
+            self.security_guard.validate_dockerignore(new_dockerignore)
+        except Exception as e:
+            raise DockerfileGenerationError() from e
+
+        return result.strip(), new_dockerignore.strip(), port

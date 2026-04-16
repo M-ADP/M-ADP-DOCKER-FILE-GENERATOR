@@ -268,6 +268,34 @@ read_file로 다음 파일들을 순서대로 확인:
 - EXPOSE 포트 명시 (기본 8080, 프레임워크별 다를 수 있음)
 - ENTRYPOINT 또는 CMD로 실행 명령 지정"""
 
+FEEDBACK_HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
+
+{tree}
+
+{context}
+
+{detect_info}
+
+---
+
+## 이전에 생성된 Dockerfile
+{dockerfile}
+
+## 이전에 생성된 .dockerignore
+{dockerignore}
+
+## 사용자 피드백
+{feedback}
+
+위 피드백을 반영하여 Dockerfile을 다시 생성하세요.
+
+**도구 사용 순서**:
+1. list_tree 도구로 실제 프로젝트 루트와 주요 디렉토리 위치를 확인하세요
+2. read_file 도구로 피드백 반영에 필요한 파일을 읽으세요
+3. (필요한 경우) search_docker_image로 권장 이미지 검색
+4. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
+5. 피드백을 반영하여 수정된 Dockerfile을 생성하세요"""
+
 HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
 {tree}

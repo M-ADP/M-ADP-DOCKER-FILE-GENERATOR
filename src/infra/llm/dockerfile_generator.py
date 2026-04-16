@@ -17,7 +17,6 @@ from src.infra.llm.dockerfile_processing import (
     _merge_env_layers,
     _merge_run_layers,
     _normalize_continuation_lines,
-    _reconcile_dockerignore_with_dockerfile,
     _remove_invalid_lines,
     _remove_missing_optional_copy_sources,
     _resolve_store_path,
@@ -327,7 +326,6 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         stack = detect_stack(store)
         logger.info(f"[DockerfileGenerator] detected stack: {stack}")
 
-        dockerignore = generate_dockerignore(store, stack)
         verifier = DockerHubVerifier()
 
         # Pydantic schemas for structured tools
@@ -439,10 +437,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             stack,
         )
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
-        dockerignore = _reconcile_dockerignore_with_dockerfile(
-            dockerignore,
-            dockerfile,
-        )
+        dockerignore = generate_dockerignore(store, stack, dockerfile)
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 

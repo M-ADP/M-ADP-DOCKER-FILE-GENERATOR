@@ -63,7 +63,9 @@ def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> b
     return False
 
 
-def _filter_build_required_patterns(lines: list[str], store: dict[str, str]) -> list[str]:
+def _filter_build_required_patterns(
+    lines: list[str], store: dict[str, str]
+) -> list[str]:
     available_required_paths = {
         _normalize_source_path(path)
         for path in store.keys()
@@ -186,8 +188,19 @@ def _reconcile_dockerignore_with_dockerfile(
     return "\n".join(result)
 
 
-def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
+def generate_dockerignore(
+    store: dict[str, str],
+    stack: Optional[str],
+    dockerfile: str,
+) -> str:
     lines = list(DOCKERIGNORE_COMMON)
+
+    copied_sources = {
+        _normalize_source_path(source)
+        for line in dockerfile.splitlines()
+        for source in _parse_copy_sources(line)
+        if source and source not in {".", "./"}
+    }
 
     files = set(Path(p).name for p in store.keys())
     dirs = set()
@@ -198,29 +211,41 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
 
     if stack and stack.startswith("node"):
         for pattern in DOCKERIGNORE_NODE:
-            lines.append(pattern)
+            if pattern.rstrip("/") not in copied_sources:
+                lines.append(pattern)
     elif stack and stack.startswith("python"):
         for pattern in DOCKERIGNORE_PYTHON:
-            lines.append(pattern)
+            if pattern.rstrip("/") not in copied_sources:
+                lines.append(pattern)
     elif stack == "java-gradle":
         for pattern in DOCKERIGNORE_JAVA_GRADLE:
-            lines.append(pattern)
+            if pattern.rstrip("/") not in copied_sources:
+                lines.append(pattern)
     elif stack == "java-maven":
         for pattern in DOCKERIGNORE_JAVA_MAVEN:
-            lines.append(pattern)
+            if pattern.rstrip("/") not in copied_sources:
+                lines.append(pattern)
     else:
         if "node_modules" in dirs or "package.json" in files:
-            lines.extend(DOCKERIGNORE_NODE)
+            for pattern in DOCKERIGNORE_NODE:
+                if pattern.rstrip("/") not in copied_sources:
+                    lines.append(pattern)
         if (
             "__pycache__" in dirs
             or "requirements.txt" in files
             or "pyproject.toml" in files
         ):
-            lines.extend(DOCKERIGNORE_PYTHON)
+            for pattern in DOCKERIGNORE_PYTHON:
+                if pattern.rstrip("/") not in copied_sources:
+                    lines.append(pattern)
         if "build.gradle" in files or "build.gradle.kts" in files or "gradle" in dirs:
-            lines.extend(DOCKERIGNORE_JAVA_GRADLE)
+            for pattern in DOCKERIGNORE_JAVA_GRADLE:
+                if pattern.rstrip("/") not in copied_sources:
+                    lines.append(pattern)
         if "pom.xml" in files:
-            lines.extend(DOCKERIGNORE_JAVA_MAVEN)
+            for pattern in DOCKERIGNORE_JAVA_MAVEN:
+                if pattern.rstrip("/") not in copied_sources:
+                    lines.append(pattern)
 
     if ".dockerignore" in files:
         lines.insert(0, "# 기존 .dockerignore 참고하여 생성됨")

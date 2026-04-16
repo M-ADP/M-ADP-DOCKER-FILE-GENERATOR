@@ -183,7 +183,15 @@ CMD ["java", "-jar", "/app.jar"]
 - `npm run build`, `yarn build`, `pnpm build`, `next build`는 애플리케이션 소스 COPY 이후에 실행해야 합니다.
 - `COPY package.json <lockfile> ./`만 한 뒤 build를 실행하면 Next.js가 app/pages/src/app 디렉토리를 찾지 못합니다.
 - Next.js는 반드시 list_tree로 `app/`, `pages/`, `src/app/`, `src/pages/` 위치를 확인하고, 빌드 전에 해당 소스가 컨테이너에 복사되도록 Dockerfile을 작성하세요.
-- package.json이 루트가 아닌 하위 디렉토리에 있으면, 해당 디렉토리를 프로젝트 루트로 보고 `COPY <하위경로>/package.json ... ./`, `COPY <하위경로>/ ./` 형태로 작성하세요.
+
+### package.json 위치 감지 (필수)
+- **중요**: package.json이 루트가 아닌 서브디렉토리에 있을 수 있습니다.
+- **반드시 list_tree로 디렉토리 구조를 확인**하여 package.json이 어디에 있는지 찾으세요.
+- 예시:
+  - `pinball/package.json` → `COPY pinball/package.json pinball/package-lock.json ./`
+  - `frontend/package.json` → `COPY frontend/package.json frontend/package-lock.json ./`
+- list_tree 결과에서 `package.json`이 표시된 경로를 확인하고, 해당 경로로 COPY 명령어를 작성하세요.
+- 특히 Vite/React 프로젝트는 często `src/` 하위에 있지 않고 별도 디렉토리에 있음
 
 ### 보안 설정
 - WORKDIR /app 고정
@@ -276,12 +284,18 @@ HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
 
 {detect_info}
 
-**도구 사용 순서**:
-1. list_tree 도구로 실제 프로젝트 루트와 src/app, app, pages 등 주요 디렉토리 위치를 확인하세요
+**도구 사용 순서** (필수):
+1. **list_tree로 프로젝트 구조 확인**: package.json, src/, app/ 등의 위치를 확인하세요
+   - **중요**: package.json이 루트가 아닌 서브디렉토리에 있을 수 있습니다 (예: pinball/package.json, frontend/package.json)
+   - list_tree 결과에서 package.json이 있는 경로를 반드시 확인하세요
 2. read_file 도구로 Dockerfile 작성에 필요한 추가 파일을 읽으세요
+   - package.json, package-lock.json, vite.config.js 등
 3. **(스택을 알 수 없을 때)**: search_docker_image 언어명)으로 권장 이미지 검색
 4. verify_docker_image 도구로 베이스 이미지가 Docker Hub에 존재하는지 검증하세요
    - 예: verify_docker_image("node:22-alpine"), verify_docker_image("python:3.12-slim")
    - EXISTS 결과를 받으면 해당 이미지를 FROM에 사용
    - NOT_FOUND 결과를 받으면 다른 태그나 이미지를 검색
-5. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
+5. **package.json 위치를 반영하여 Dockerfile 작성**:
+   - `pinball/package.json` → `COPY pinball/package.json pinball/package-lock.json ./`
+   - 서브디렉토리의 package.json을 기준으로 WORKDIR과 COPY 경로를 설정하세요
+6. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""

@@ -38,7 +38,7 @@ EXPOSE 3000
 CMD ["serve", "-s", "dist", "-l", "3000"]
 ```
 
-#### Node.js 서버 예시
+#### Node.js 서버 예시 (npm)
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
@@ -56,6 +56,28 @@ ENV NODE_ENV=production
 USER appuser
 EXPOSE 3000
 CMD ["node", "src/index.js"]
+```
+
+#### Node.js 서버 예시 (pnpm)
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+RUN npm install -g pnpm
+COPY package.json pnpm-lock.yaml ./
+COPY . .
+RUN pnpm install --frozen-lockfile && pnpm store prune
+
+FROM node:22-alpine
+WORKDIR /app
+RUN npm install -g pnpm && addgroup -S appgroup && adduser -S appuser -G appgroup
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/src ./src
+RUN chown -R appuser:appgroup /app
+ENV NODE_ENV=production
+USER appuser
+EXPOSE 3000
+CMD ["pnpm", "start"]
 ```
 
 #### Python 예시
@@ -142,10 +164,14 @@ CMD ["java", "-jar", "/app.jar"]
 
 ### Node.js 패키지 매니저 사용 시 필수
 - **node:22-alpine에는 npm만 기본 설치됨** (yarn, pnpm, bun은 기본 설치되지 않음)
-- yarn.lock이 있으면: `RUN npm install -g yarn` 후 `yarn install ...`
-- pnpm-lock.yaml이 있으면: `RUN npm install -g pnpm` 후 `pnpm install ...`
-- bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install ...`
-- 명령어 실행 시 해당 패키지 매니저가 설치되어 있는지 확인하고, 없으면 설치 후 사용
+- yarn.lock이 있으면: builder와 runner 모두 `RUN npm install -g yarn` 설치
+- pnpm-lock.yaml이 있으면: builder와 runner 모두 `RUN npm install -g pnpm` 설치
+- bun.lockb가 있으면: builder와 runner 모두 `RUN npm install -g bun` 설치
+- **멀티스테이지 빌드에서 각 스테이지는 독립적** — builder에 설치된 패키지 매니저는 runner에 자동 전달되지 않음
+- **CMD에서 pnpm/yarn/bun을 사용한다면 runner stage에도 반드시 해당 패키지 매니저를 설치해야 함**
+  - `CMD ["pnpm", "start"]` → runner에 `RUN npm install -g pnpm` 필수
+  - `CMD ["yarn", "start"]` → runner에 `RUN npm install -g yarn` 필수
+  - `CMD ["bun", "run", "start"]` → runner에 `RUN npm install -g bun` 필수
 
 1. **Node.js 정적 빌드 (node-static)**
    - 빌드 스테이지: npm ci + npm run build + cache clean을 하나의 RUN에 결합
@@ -154,8 +180,9 @@ CMD ["java", "-jar", "/app.jar"]
 
 2. **Node.js 서버 (node-server)**
    - 빌드 스테이지: npm ci + cache clean을 하나의 RUN에 결합
-   - runner: user 생성 + chown을 하나의 RUN에 결합
+   - runner: 패키지 매니저 설치(필요 시) + user 생성 + chown을 하나의 RUN에 결합
    - CMD는 package.json의 main 또는 scripts.start를 read_file로 확인
+   - **CMD에 pnpm/yarn/bun을 사용하면 runner에도 해당 패키지 매니저 설치 필수**
 
 3. **Python (FastAPI, Flask)**
    - 빌드 스테이지: pip install + cache clean을 하나의 RUN에 결합
@@ -208,6 +235,9 @@ CMD ["java", "-jar", "/app.jar"]
 - 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
 - Node/Next.js에서 build를 애플리케이션 소스 COPY 전에 실행 금지
 - 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정
+- **멀티스테이지에서 패키지 매니저 누락 금지**: builder에 pnpm/yarn/bun을 설치했더라도 runner stage는 독립적이므로 CMD에서 해당 패키지 매니저를 사용한다면 runner에도 반드시 설치
+  - 잘못된 예: builder에만 `RUN npm install -g pnpm`, runner CMD: `["pnpm", "start"]` → **pnpm: not found 에러**
+  - 올바른 예: runner에 `RUN npm install -g pnpm && addgroup -S appgroup && ...`
 - **Java JAR 와일드카드 금지**: `COPY --from=builder /app/build/libs/*.jar /app.jar` 금지
   - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
   - 와일드카드를 단일 파일에 복사하면 Docker/Kaniko 에러 발생

@@ -139,8 +139,35 @@ OPTIONAL_NODE_COPY_FILES = {
 }
 
 
+def _normalize_source_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/")
+
+
+def _is_build_required_path(path: str) -> bool:
+    normalized = _normalize_source_path(path)
+    basename = Path(normalized).name
+
+    if normalized in BUILD_REQUIRED_PATHS or basename in BUILD_REQUIRED_PATHS:
+        return True
+
+    return any(
+        normalized.endswith(f"/{required}") for required in BUILD_REQUIRED_PATHS
+    )
+
+
+def _is_available_source(path: str, available_paths: set[str]) -> bool:
+    normalized = _normalize_source_path(path)
+    normalized_available_paths = {
+        _normalize_source_path(available) for available in available_paths
+    }
+    return normalized in normalized_available_paths
+
+
 def _normalize_dockerignore_pattern(pattern: str) -> str:
-    return pattern.strip().lstrip("/")
+    return _normalize_source_path(pattern)
 
 
 def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> bool:
@@ -169,7 +196,9 @@ def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> b
 
 def _filter_build_required_patterns(lines: list[str], store: dict[str, str]) -> list[str]:
     available_required_paths = {
-        path for path in store.keys() if path in BUILD_REQUIRED_PATHS
+        _normalize_source_path(path)
+        for path in store.keys()
+        if _is_build_required_path(path)
     }
     if not available_required_paths:
         return lines
@@ -226,7 +255,16 @@ def _remove_missing_optional_copy_sources(
         kept_sources: list[str] = []
         removed_sources: list[str] = []
         for source in sources:
-            if source in OPTIONAL_NODE_COPY_FILES and source not in available_paths:
+            source_path = _normalize_source_path(source)
+            source_name = Path(source_path).name
+            is_optional_node_file = (
+                source_path in OPTIONAL_NODE_COPY_FILES
+                or source_name in OPTIONAL_NODE_COPY_FILES
+            )
+            if is_optional_node_file and not _is_available_source(
+                source,
+                available_paths,
+            ):
                 removed_sources.append(source)
                 continue
             kept_sources.append(source)

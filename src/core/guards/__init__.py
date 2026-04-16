@@ -30,6 +30,11 @@ class DangerousDockerfileError(AppException):
     message = "위험한 Dockerfile 패턴이 감지되었습니다."
 
 
+class InvalidDockerignoreError(AppException):
+    status_code = 400
+    message = ".dockerignore에 빌드 필수 파일 제외 패턴이 포함되었습니다."
+
+
 class TarSecurityGuard:
     MAX_EXTRACT_SIZE = 500 * 1024 * 1024
     MAX_FILE_COUNT = 10_000
@@ -105,6 +110,33 @@ class SourceSecurityGuard:
 
 
 class CompositeSecurityGuard:
+    DOCKERIGNORE_REQUIRED_FILES = {
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "requirements.txt",
+        "pyproject.toml",
+        "poetry.lock",
+        "Pipfile",
+        "Pipfile.lock",
+        "uv.lock",
+        "pom.xml",
+        "mvnw",
+        "mvnw.cmd",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "gradlew.bat",
+        "go.mod",
+        "go.sum",
+    }
+
     def __init__(self) -> None:
         self.tar_guard = TarSecurityGuard()
         self.dockerfile_guard = DockerfileSecurityGuard()
@@ -120,4 +152,12 @@ class CompositeSecurityGuard:
         self.dockerfile_guard.validate(dockerfile)
 
     def validate_dockerignore(self, dockerignore: str) -> None:
-        pass
+        for line in dockerignore.splitlines():
+            pattern = line.strip().replace("\\", "/")
+            if not pattern or pattern.startswith("#") or pattern.startswith("!"):
+                continue
+            while pattern.startswith("./"):
+                pattern = pattern[2:]
+            pattern = pattern.lstrip("/")
+            if pattern in self.DOCKERIGNORE_REQUIRED_FILES:
+                raise InvalidDockerignoreError(pattern)

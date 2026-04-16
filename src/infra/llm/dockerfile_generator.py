@@ -17,10 +17,12 @@ from src.infra.llm.dockerfile_processing import (
     _merge_env_layers,
     _merge_run_layers,
     _normalize_continuation_lines,
+    _normalize_source_path,
     _remove_invalid_lines,
     _remove_missing_optional_copy_sources,
     _resolve_store_path,
     _sanitize_base_images,
+    _validate_copy_coverage,
     _validate_dockerfile_against_source,
     _validate_dockerfile_syntax,
     generate_dockerignore,
@@ -131,6 +133,50 @@ def detect_stack(store: dict[str, str]) -> Optional[str]:
     return max(scores.items(), key=lambda x: x[1])[0]
 
 
+def detect_project_root(store: dict[str, str], stack: Optional[str]) -> str:
+    """소스 파일 경로에서 프로젝트 루트 디렉토리를 감지합니다.
+
+    Returns:
+        project root path with trailing slash (e.g. "pinball/"), or "" if root.
+    """
+    root_indicators = {
+        "package.json",
+        "requirements.txt",
+        "pyproject.toml",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "go.mod",
+        "Cargo.toml",
+        "Gemfile",
+        "composer.json",
+        "Pipfile",
+    }
+    if stack and stack in STACK_PATTERNS:
+        config = STACK_PATTERNS[stack]
+        for f in config.get("detector", []) + config.get("secondary", []):
+            if "/" not in f:
+                root_indicators.add(f)
+
+    # dir → depth (number of path segments)
+    candidate_dirs: dict[str, int] = {}
+    for path in store.keys():
+        normalized = _normalize_source_path(path)
+        filename = normalized.split("/")[-1] if "/" in normalized else normalized
+        if filename not in root_indicators:
+            continue
+        parent = "/".join(normalized.split("/")[:-1]) if "/" in normalized else ""
+        depth = len(parent.split("/")) if parent else 0
+        if parent not in candidate_dirs or depth < candidate_dirs[parent]:
+            candidate_dirs[parent] = depth
+
+    if not candidate_dirs:
+        return ""
+
+    shallowest_dir = min(candidate_dirs.items(), key=lambda x: x[1])[0]
+    return (shallowest_dir + "/") if shallowest_dir else ""
+
+
 class DockerfileGenerator(BaseDockerfileGenerator):
     def __init__(self) -> None:
         self.llm = NovaLLM()
@@ -149,7 +195,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 )
         return "\n".join(lines)
 
-    def _build_detect_info(self, stack: Optional[str]) -> str:
+    def _build_detect_info(self, stack: Optional[str], project_root: str = "") -> str:
         if stack is None:
             return (
                 "감지된 스택 없음. 파일을 직접 분석하여 적절한 Dockerfile을 생성하세요."
@@ -323,6 +369,16 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         elif config["cmd"]:
             lines.append(f"- CMD: {config['cmd']}")
 
+        if project_root:
+            lines += [
+                "",
+                f"⚠️ **프로젝트 루트: `{project_root}`**",
+                f"  - 소스코드가 루트가 아닌 `{project_root}` 하위에 있습니다.",
+                f"  - 개별 파일 COPY 대신 **`COPY {project_root} .`** 를 사용하여 전체 디렉토리를 복사하세요.",
+                f"  - 예: `COPY package.json ./` 이 아닌 `COPY {project_root} .`",
+                f"  - 개별 COPY를 사용하면 `{project_root}index.html` 같은 루트 파일이 누락될 수 있습니다.",
+            ]
+
         lines.append("\n위 규칙을 반드시 준수하세요.")
         return "\n".join(lines)
 
@@ -333,7 +389,10 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         context: str,
     ) -> tuple[str, str, int]:
         stack = detect_stack(store)
-        logger.info(f"[DockerfileGenerator] detected stack: {stack}")
+        project_root = detect_project_root(store, stack)
+        logger.info(
+            f"[DockerfileGenerator] detected stack: {stack}, project_root: '{project_root}'"
+        )
 
         verifier = DockerHubVerifier()
 
@@ -430,7 +489,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 content=HUMAN_PROMPT.format(
                     tree=tree,
                     context=context,
-                    detect_info=self._build_detect_info(stack),
+                    detect_info=self._build_detect_info(stack, project_root),
                 )
             ),
         ]
@@ -444,6 +503,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             messages,
             store,
             stack,
+            project_root,
         )
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
         dockerignore = generate_dockerignore(store, stack, dockerfile)
@@ -471,6 +531,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         messages: list,
         store: dict[str, str],
         stack: Optional[str],
+        project_root: str = "",
     ) -> str:
         last_error = None
 
@@ -493,24 +554,40 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                     for issue in source_issues:
                         logger.error(f"[Dockerfile] Source issue: {issue}")
                     raise ValueError(
-                        f"Dockerfile does not match source tree: {'; '.join(source_issues[:3])}"
+                        f"Dockerfile source validation failed: {'; '.join(source_issues[:3])}"
                     )
+
+                coverage_issues = _validate_copy_coverage(result, store, project_root)
+                if coverage_issues:
+                    for issue in coverage_issues:
+                        logger.error(f"[Dockerfile] Coverage issue: {issue}")
+                    raise ValueError(
+                        f"Dockerfile COPY coverage incomplete: {'; '.join(coverage_issues[:3])}"
+                    )
+
                 return result
             except ValueError as e:
                 last_error = e
                 logger.warning(
                     f"[DockerfileGenerator] Attempt {attempt + 1}/{MAX_AGENT_RETRIES} failed: {e}"
                 )
-                messages.append(
-                    HumanMessage(
-                        content=(
-                            "이전 Dockerfile은 소스 트리 검증에 실패했습니다. "
-                            f"오류: {e}. list_tree/read_file 결과를 다시 반영하여 "
-                            "WORKDIR 기준으로 build 전에 app, pages, src/app, src/pages 디렉토리가 "
-                            "컨테이너에 복사되도록 Dockerfile만 다시 생성하세요."
-                        )
+                if project_root and "coverage" in str(e):
+                    retry_msg = (
+                        "이전 Dockerfile은 소스 커버리지 검증에 실패했습니다. "
+                        f"오류: {e}. "
+                        f"프로젝트 루트 '{project_root}'의 모든 파일을 복사하려면 "
+                        f"`COPY {project_root} .`을 사용하세요. "
+                        "개별 파일 COPY는 index.html 같은 파일을 누락할 수 있습니다. "
+                        "list_tree로 실제 파일 목록을 확인하고 Dockerfile만 다시 생성하세요."
                     )
-                )
+                else:
+                    retry_msg = (
+                        "이전 Dockerfile은 소스 트리 검증에 실패했습니다. "
+                        f"오류: {e}. list_tree/read_file 결과를 다시 반영하여 "
+                        "build 전에 필요한 소스 디렉토리가 컨테이너에 복사되도록 "
+                        "Dockerfile만 다시 생성하세요."
+                    )
+                messages.append(HumanMessage(content=retry_msg))
                 continue
             except Exception as e:
                 last_error = e

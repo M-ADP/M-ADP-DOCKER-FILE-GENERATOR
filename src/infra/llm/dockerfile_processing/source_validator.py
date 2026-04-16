@@ -181,6 +181,62 @@ def _validate_dockerfile_against_source(
     return issues
 
 
+def _validate_copy_coverage(
+    dockerfile: str,
+    store: dict[str, str],
+    project_root: str,
+) -> list[str]:
+    """프로젝트 루트 하위 파일이 Dockerfile COPY 커맨드로 커버되는지 검증합니다.
+
+    project_root가 비어 있으면 검증을 건너뜁니다.
+    """
+    if not project_root:
+        return []
+
+    normalized_root = _normalize_source_path(project_root).rstrip("/")
+    if not normalized_root:
+        return []
+
+    # 프로젝트 루트 하위 store 파일 수집
+    files_under_root: set[str] = set()
+    for path in store.keys():
+        normalized = _normalize_source_path(path)
+        if normalized == normalized_root or normalized.startswith(normalized_root + "/"):
+            files_under_root.add(normalized)
+
+    if not files_under_root:
+        return []
+
+    # Dockerfile에서 --from= 없는 COPY 소스 수집 (빌드 컨텍스트 COPY만)
+    covered_sources: list[str] = []
+    for _, logical_line in _logical_dockerfile_lines(dockerfile):
+        copy_instruction = _parse_copy_instruction(logical_line)
+        if copy_instruction:
+            sources, _ = copy_instruction
+            for source in sources:
+                covered_sources.append(_normalize_source_path(source).rstrip("/"))
+
+    def is_covered(file_path: str) -> bool:
+        for src in covered_sources:
+            if not src or src == ".":
+                return True  # COPY . . → 전체 커버
+            if src == file_path:
+                return True  # 정확히 일치
+            if file_path.startswith(src + "/"):
+                return True  # 디렉토리 커버 (COPY pinball/ .)
+        return False
+
+    uncovered = sorted(f for f in files_under_root if not is_covered(f))
+    if not uncovered:
+        return []
+
+    return [
+        f"프로젝트 루트 '{normalized_root}/'의 파일이 COPY에서 누락되었습니다: "
+        + ", ".join(uncovered[:5])
+        + ("..." if len(uncovered) > 5 else "")
+    ]
+
+
 def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
     """Dockerfile 문법 검증 - 문제 패턴 감지"""
     issues = []

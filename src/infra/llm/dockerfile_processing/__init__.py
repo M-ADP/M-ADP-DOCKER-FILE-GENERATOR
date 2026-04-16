@@ -26,6 +26,7 @@ from src.infra.llm.dockerfile_processing.source_validator import (
     _logical_dockerfile_lines,
     _route_available_for_workdir,
     _source_maps_route_to_image_path,
+    _validate_copy_coverage,
     _validate_dockerfile_against_source,
     _validate_dockerfile_syntax,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "_route_available_for_workdir",
     "_sanitize_base_images",
     "_source_maps_route_to_image_path",
+    "_validate_copy_coverage",
     "_validate_dockerfile_against_source",
     "_validate_dockerfile_syntax",
     "generate_dockerignore",

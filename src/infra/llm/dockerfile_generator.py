@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import shlex
@@ -166,29 +167,72 @@ def _is_available_source(path: str, available_paths: set[str]) -> bool:
     return normalized in normalized_available_paths
 
 
+def _parse_copy_sources(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("COPY ") or "--from=" in stripped:
+        return []
+
+    copy_body = stripped[5:].strip()
+    if copy_body.startswith("["):
+        try:
+            copy_parts = json.loads(copy_body)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(copy_parts, list) and len(copy_parts) >= 2:
+            return [part for part in copy_parts[:-1] if isinstance(part, str)]
+        return []
+
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        return []
+
+    if len(tokens) < 3 or tokens[0] != "COPY":
+        return []
+
+    source_start = 1
+    while source_start < len(tokens) and tokens[source_start].startswith("--"):
+        source_start += 1
+
+    return tokens[source_start:-1]
+
+
 def _normalize_dockerignore_pattern(pattern: str) -> str:
     return _normalize_source_path(pattern)
 
 
-def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> bool:
-    normalized = _normalize_dockerignore_pattern(pattern)
-    if not normalized or normalized.startswith("#") or normalized.startswith("!"):
+def _dockerignore_pattern_matches_path(pattern: str, path: str) -> bool:
+    normalized_pattern = _normalize_dockerignore_pattern(pattern)
+    normalized_path = _normalize_source_path(path)
+
+    if (
+        not normalized_pattern
+        or normalized_pattern.startswith("#")
+        or normalized_pattern.startswith("!")
+    ):
         return False
 
-    if normalized.endswith("/"):
-        directory = normalized.rstrip("/")
-        return any(
-            path == directory or path.startswith(f"{directory}/")
-            for path in required_paths
+    if normalized_pattern.endswith("/"):
+        directory = normalized_pattern.rstrip("/")
+        return (
+            normalized_path == directory
+            or normalized_path.startswith(f"{directory}/")
+            or Path(normalized_path).name == directory
         )
 
-    for path in required_paths:
-        basename = Path(path).name
-        if normalized == path or normalized == basename:
-            return True
-        if "/" in normalized and fnmatch(path, normalized):
-            return True
-        if "/" not in normalized and fnmatch(basename, normalized):
+    basename = Path(normalized_path).name
+    if normalized_pattern == normalized_path or normalized_pattern == basename:
+        return True
+
+    if "/" in normalized_pattern:
+        return fnmatch(normalized_path, normalized_pattern)
+
+    return fnmatch(basename, normalized_pattern)
+
+
+def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> bool:
+    for required_path in required_paths:
+        if _dockerignore_pattern_matches_path(pattern, required_path):
             return True
 
     return False
@@ -284,6 +328,35 @@ def _remove_missing_optional_copy_sources(
         result.append(
             " ".join([f"{indent}COPY", *option_tokens, *kept_sources, destination])
         )
+
+    return "\n".join(result)
+
+
+def _reconcile_dockerignore_with_dockerfile(
+    dockerignore: str,
+    dockerfile: str,
+) -> str:
+    copied_sources = {
+        _normalize_source_path(source)
+        for line in dockerfile.splitlines()
+        for source in _parse_copy_sources(line)
+        if source and source not in {".", "./"}
+    }
+    if not copied_sources:
+        return dockerignore
+
+    result: list[str] = []
+    for line in dockerignore.splitlines():
+        if any(
+            _dockerignore_pattern_matches_path(line, copied_source)
+            for copied_source in copied_sources
+        ):
+            logger.warning(
+                "[Dockerignore] Removed pattern conflicting with Dockerfile COPY: %s",
+                line,
+            )
+            continue
+        result.append(line)
 
     return "\n".join(result)
 
@@ -1352,6 +1425,10 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             messages,
         )
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
+        dockerignore = _reconcile_dockerignore_with_dockerfile(
+            dockerignore,
+            dockerfile,
+        )
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 

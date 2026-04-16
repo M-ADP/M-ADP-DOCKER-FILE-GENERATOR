@@ -1,5 +1,6 @@
 import io
 import tarfile
+from fnmatch import fnmatch
 from pathlib import Path
 
 from src.core.exceptions import AppException
@@ -159,5 +160,14 @@ class CompositeSecurityGuard:
             while pattern.startswith("./"):
                 pattern = pattern[2:]
             pattern = pattern.lstrip("/")
+            basename = Path(pattern.rstrip("/")).name
             if pattern in self.DOCKERIGNORE_REQUIRED_FILES:
+                raise InvalidDockerignoreError(pattern)
+            if basename in self.DOCKERIGNORE_REQUIRED_FILES:
+                raise InvalidDockerignoreError(pattern)
+            if any(
+                fnmatch(required_file, pattern)
+                or fnmatch(Path(required_file).name, pattern)
+                for required_file in self.DOCKERIGNORE_REQUIRED_FILES
+            ):
                 raise InvalidDockerignoreError(pattern)

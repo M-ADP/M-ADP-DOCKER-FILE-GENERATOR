@@ -14,6 +14,7 @@ from src.infra.llm.nova import NovaLLM
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
+MAX_AGENT_RETRIES = 3
 
 DOCKERIGNORE_COMMON = [
     ".git/",
@@ -777,7 +778,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             ),
         ]
 
-        dockerfile = await self._run_agent(
+        dockerfile = await self._run_agent_with_retry(
             llm_with_tools, read_file, verify_docker_image, messages
         )
         port = self._extract_port(dockerfile, stack)
@@ -793,6 +794,38 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             return int(STACK_PATTERNS[stack]["expose"])
 
         return 8080
+
+    async def _run_agent_with_retry(
+        self,
+        llm_with_tools,
+        read_file_tool: Callable,
+        verify_image_tool: Callable,
+        messages: list,
+    ) -> str:
+        last_error = None
+
+        for attempt in range(MAX_AGENT_RETRIES):
+            try:
+                result = await self._run_agent(
+                    llm_with_tools, read_file_tool, verify_image_tool, messages
+                )
+                return result
+            except ValueError as e:
+                last_error = e
+                logger.warning(
+                    f"[DockerfileGenerator] Attempt {attempt + 1}/{MAX_AGENT_RETRIES} failed: {e}"
+                )
+                continue
+            except Exception as e:
+                last_error = e
+                logger.error(
+                    f"[DockerfileGenerator] Attempt {attempt + 1}/{MAX_AGENT_RETRIES} error: {e}"
+                )
+                continue
+
+        raise ValueError(
+            f"Failed to generate Dockerfile after {MAX_AGENT_RETRIES} attempts. Last error: {last_error}"
+        )
 
     async def _run_agent(
         self,
@@ -861,6 +894,9 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
     @staticmethod
     def _clean(content: str) -> str:
+        if not content or not content.strip():
+            raise ValueError("LLM returned empty content before cleaning")
+
         content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
         content = re.sub(r"```[a-zA-Z]*\n?", "", content)
         content = re.sub(r"^\s*#.*\n?", "", content, flags=re.MULTILINE)
@@ -874,4 +910,12 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         content = _sanitize_base_images(content)
         content = _remove_invalid_lines(content)
         content = _ensure_from_first(content)
-        return content.strip()
+
+        result = content.strip()
+        if not result:
+            raise ValueError("Dockerfile content became empty after cleaning")
+        if not result.startswith("FROM"):
+            raise ValueError(
+                f"Dockerfile must start with FROM instruction. Got: {result[:100]}"
+            )
+        return result

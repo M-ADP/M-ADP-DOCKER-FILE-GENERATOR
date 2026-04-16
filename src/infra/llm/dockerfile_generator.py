@@ -1,5 +1,7 @@
 import logging
 import re
+import shlex
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -59,8 +61,6 @@ DOCKERIGNORE_NODE = [
     ".npm/",
     ".yarn/",
     ".yarn-integrity",
-    "yarn.lock",
-    "package-lock.json",
 ]
 
 DOCKERIGNORE_PYTHON = [
@@ -99,6 +99,155 @@ DOCKERIGNORE_JAVA_MAVEN = [
     "*.ear",
     ".mvn/",
 ]
+
+BUILD_REQUIRED_PATHS = {
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+    "requirements.txt",
+    "pyproject.toml",
+    "poetry.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "uv.lock",
+    "pom.xml",
+    "mvnw",
+    "mvnw.cmd",
+    ".mvn/wrapper/maven-wrapper.jar",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradlew",
+    "gradlew.bat",
+    "gradle/wrapper/gradle-wrapper.jar",
+    "go.mod",
+    "go.sum",
+}
+
+OPTIONAL_NODE_COPY_FILES = {
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+}
+
+
+def _normalize_dockerignore_pattern(pattern: str) -> str:
+    return pattern.strip().lstrip("/")
+
+
+def _pattern_excludes_required_file(pattern: str, required_paths: set[str]) -> bool:
+    normalized = _normalize_dockerignore_pattern(pattern)
+    if not normalized or normalized.startswith("#") or normalized.startswith("!"):
+        return False
+
+    if normalized.endswith("/"):
+        directory = normalized.rstrip("/")
+        return any(
+            path == directory or path.startswith(f"{directory}/")
+            for path in required_paths
+        )
+
+    for path in required_paths:
+        basename = Path(path).name
+        if normalized == path or normalized == basename:
+            return True
+        if "/" in normalized and fnmatch(path, normalized):
+            return True
+        if "/" not in normalized and fnmatch(basename, normalized):
+            return True
+
+    return False
+
+
+def _filter_build_required_patterns(lines: list[str], store: dict[str, str]) -> list[str]:
+    available_required_paths = {
+        path for path in store.keys() if path in BUILD_REQUIRED_PATHS
+    }
+    if not available_required_paths:
+        return lines
+
+    filtered: list[str] = []
+    for line in lines:
+        if _pattern_excludes_required_file(line, available_required_paths):
+            logger.warning(
+                "[Dockerignore] Removed build-required exclusion pattern: %s",
+                line,
+            )
+            continue
+        filtered.append(line)
+
+    return filtered
+
+
+def _remove_missing_optional_copy_sources(
+    dockerfile: str,
+    store: dict[str, str],
+) -> str:
+    available_paths = set(store.keys())
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("COPY ") or "--from=" in stripped:
+            result.append(line)
+            continue
+
+        try:
+            tokens = shlex.split(stripped)
+        except ValueError:
+            result.append(line)
+            continue
+
+        if len(tokens) < 3 or tokens[0] != "COPY":
+            result.append(line)
+            continue
+
+        option_tokens: list[str] = []
+        source_start = 1
+        while source_start < len(tokens) and tokens[source_start].startswith("--"):
+            option_tokens.append(tokens[source_start])
+            source_start += 1
+
+        sources = tokens[source_start:-1]
+        destination = tokens[-1]
+        if not sources:
+            result.append(line)
+            continue
+
+        kept_sources: list[str] = []
+        removed_sources: list[str] = []
+        for source in sources:
+            if source in OPTIONAL_NODE_COPY_FILES and source not in available_paths:
+                removed_sources.append(source)
+                continue
+            kept_sources.append(source)
+
+        if not removed_sources:
+            result.append(line)
+            continue
+
+        logger.warning(
+            "[Dockerfile] Removed missing optional COPY sources: %s",
+            ", ".join(removed_sources),
+        )
+        if not kept_sources:
+            continue
+
+        indent = line[: len(line) - len(line.lstrip())]
+        result.append(
+            " ".join([f"{indent}COPY", *option_tokens, *kept_sources, destination])
+        )
+
+    return "\n".join(result)
 
 
 def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
@@ -140,6 +289,7 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
     if ".dockerignore" in files:
         lines.insert(0, "# 기존 .dockerignore 참고하여 생성됨")
 
+    lines = _filter_build_required_patterns(lines, store)
     return "\n".join(lines)
 
 
@@ -787,6 +937,11 @@ CMD ["java", "-jar", "/app.jar"]
 
 ## 공통 필수 규칙
 
+### Dockerfile과 .dockerignore 정합성
+- Dockerfile에서 COPY하는 파일은 .dockerignore에서 제외되면 안 됩니다.
+- package.json, package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb 등 의존성 설치에 필요한 파일은 실제 존재하는 파일만 COPY하세요.
+- npm/yarn/pnpm/bun lockfile을 한 줄에 모두 나열하지 마세요. 저장소에 있는 package manager의 lockfile만 선택하세요.
+
 ### 보안 설정
 - WORKDIR /app 고정
 - EXPOSE 포트 명시
@@ -920,9 +1075,14 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **package.json COPY**: `COPY package.json package-lock.json yarn.lock ./`",
-                "3. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
-                "   또는 `RUN yarn install --frozen-lockfile && yarn build && yarn cache clean`",
+                "2. **package.json COPY**: `COPY package.json <실제로 존재하는 lockfile> ./`",
+                "   - package-lock.json이 있으면 npm ci 사용: `COPY package.json package-lock.json ./`",
+                "   - yarn.lock이 있으면 yarn 사용: `COPY package.json yarn.lock ./`",
+                "   - pnpm-lock.yaml이 있으면 pnpm 사용: `COPY package.json pnpm-lock.yaml ./`",
+                "   - 존재하지 않는 lockfile을 COPY에 포함하지 마세요.",
+                "3. **레이어 결합 필수**: package manager에 맞춰 install/build/cache clean을 한 RUN에 결합",
+                "   - npm: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "   - yarn: `RUN yarn install --frozen-lockfile && yarn build && yarn cache clean`",
                 "4. **런타임 스테이지**: `FROM node:22-alpine`",
                 "5. **복사**: `COPY --from=builder /app/.next ./.next`",
                 "   `COPY --from=builder /app/public ./public`",
@@ -1153,6 +1313,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             search_docker_image,
             messages,
         )
+        dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 

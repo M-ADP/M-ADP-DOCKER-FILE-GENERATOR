@@ -56,8 +56,72 @@ class LanguageDetectionHandler(PriorityHandler):
         if basename in self.LANGUAGE_DETECTION_FILES:
             return FilePriority(
                 path=path,
-                priority=1,
+                priority=2,  # FrameworkHandler(1) 다음
                 reason=f"language_detection:{basename}",
+            )
+        return None
+
+
+class FrameworkHandler(PriorityHandler):
+    """프레임워크 특정 설정 파일 - 가장 높은 우선순위"""
+
+    FRAMEWORK_FILES = {
+        # Next.js
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.ts",
+        # Nuxt
+        "nuxt.config.js",
+        "nuxt.config.ts",
+        # Vue
+        "vue.config.js",
+        "vue.config.ts",
+        # Vite
+        "vite.config.js",
+        "vite.config.ts",
+        # Svelte
+        "svelte.config.js",
+        "svelte.config.ts",
+        # Astro
+        "astro.config.js",
+        "astro.config.mjs",
+        "astro.config.ts",
+        # Remix
+        "remix.config.js",
+        # Gatsby
+        "gatsby-config.js",
+        "gatsby-config.ts",
+        # Django
+        "manage.py",
+        "settings.py",
+        "urls.py",
+        # Flask
+        "wsgi.py",
+        "asgi.py",
+        # FastAPI
+        "main.py",
+        # Spring Boot
+        "application.properties",
+        "application.yml",
+        "application.yaml",
+        "Application.java",
+        "Application.kt",
+        # Rails
+        "config.ru",
+        "Rakefile",
+        # Laravel
+        "artisan",
+        # Express
+        "app.js",
+        "server.js",
+    }
+
+    def _can_handle(self, path: str, basename: str, ext: str) -> Optional[FilePriority]:
+        if basename in self.FRAMEWORK_FILES:
+            return FilePriority(
+                path=path,
+                priority=1,
+                reason=f"framework:{basename}",
             )
         return None
 
@@ -89,7 +153,7 @@ class EntryPointHandler(PriorityHandler):
         if basename in self.ENTRY_POINT_FILES:
             return FilePriority(
                 path=path,
-                priority=2,
+                priority=3,
                 reason=f"entry_point:{basename}",
             )
         return None
@@ -104,18 +168,7 @@ class ConfigHandler(PriorityHandler):
         "config.yml",
         "config.yaml",
         "config.json",
-        "settings.py",
         "settings.json",
-        "next.config.js",
-        "next.config.mjs",
-        "next.config.ts",
-        "nuxt.config.js",
-        "nuxt.config.ts",
-        "vue.config.js",
-        "vite.config.js",
-        "vite.config.ts",
-        "webpack.config.js",
-        "rollup.config.js",
         "tsconfig.json",
         "jsconfig.json",
         ".eslintrc.js",
@@ -133,7 +186,7 @@ class ConfigHandler(PriorityHandler):
         if basename in self.CONFIG_FILES:
             return FilePriority(
                 path=path,
-                priority=3,
+                priority=4,
                 reason=f"config:{basename}",
             )
         return None
@@ -177,7 +230,7 @@ class SourceHandler(PriorityHandler):
         if ext.lower() in self.SOURCE_EXTENSIONS:
             return FilePriority(
                 path=path,
-                priority=4,
+                priority=5,
                 reason=f"source:{ext}",
             )
         return None
@@ -202,7 +255,8 @@ class PriorityAnalysisAgent:
         config = ConfigHandler(source)
         entry = EntryPointHandler(config)
         lang = LanguageDetectionHandler(entry)
-        return lang
+        framework = FrameworkHandler(lang)
+        return framework
 
     def analyze(self, files: dict[str, str]) -> list[FilePriority]:
         priorities: list[FilePriority] = []

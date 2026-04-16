@@ -474,60 +474,148 @@ def _validate_dockerfile_syntax(dockerfile: str) -> tuple[bool, list[str]]:
 
 
 STACK_PATTERNS = {
+    "nextjs": {
+        "detector": ["next.config.js", "next.config.mjs", "next.config.ts"],
+        "secondary": ["package.json"],
+        "score": 100,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "nuxt": {
+        "detector": ["nuxt.config.js", "nuxt.config.ts"],
+        "secondary": ["package.json"],
+        "score": 100,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "vue": {
+        "detector": ["vue.config.js", "vue.config.ts"],
+        "secondary": ["package.json"],
+        "score": 90,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "svelte": {
+        "detector": ["svelte.config.js", "svelte.config.ts"],
+        "secondary": ["package.json"],
+        "score": 90,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "astro": {
+        "detector": ["astro.config.js", "astro.config.mjs", "astro.config.ts"],
+        "secondary": ["package.json"],
+        "score": 90,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "vite-static": {
+        "detector": ["vite.config.js", "vite.config.ts"],
+        "secondary": ["package.json"],
+        "score": 80,
+        "expose": "3000",
+        "cmd": "serve -s dist -l 3000",
+    },
     "node-static": {
-        "detector": [
-            "vite.config.js",
-            "vite.config.ts",
-            "next.config.js",
-            "next.config.ts",
-            "svelte.config.js",
-            "astro.config.js",
-            "astro.config.ts",
-        ],
+        "detector": [],
+        "secondary": ["package.json"],
+        "score": 70,
         "expose": "3000",
         "cmd": "serve -s dist -l 3000",
     },
     "node-server": {
         "detector": ["server.js", "app.js", "index.js"],
+        "secondary": ["package.json"],
+        "score": 60,
         "expose": "3000",
         "cmd": None,
     },
     "python-fastapi": {
         "detector": ["main.py"],
+        "secondary": ["requirements.txt", "pyproject.toml"],
+        "score": 80,
         "expose": "8000",
         "cmd": "uvicorn main:app --host 0.0.0.0 --port 8000",
     },
     "python-flask": {
         "detector": ["app.py"],
+        "secondary": ["requirements.txt", "pyproject.toml"],
+        "score": 70,
         "expose": "5000",
         "cmd": "flask run --host 0.0.0.0 --port 5000",
     },
     "java-gradle": {
         "detector": ["build.gradle", "build.gradle.kts"],
+        "secondary": ["settings.gradle"],
+        "score": 80,
         "expose": "8080",
         "cmd": None,
     },
     "java-maven": {
         "detector": ["pom.xml"],
+        "secondary": [],
+        "score": 80,
         "expose": "8080",
         "cmd": None,
     },
     "go": {
         "detector": ["go.mod"],
+        "secondary": [],
+        "score": 80,
         "expose": "8080",
+        "cmd": None,
+    },
+    "rust": {
+        "detector": ["Cargo.toml"],
+        "secondary": [],
+        "score": 80,
+        "expose": "8080",
+        "cmd": None,
+    },
+    "ruby": {
+        "detector": ["Gemfile"],
+        "secondary": [],
+        "score": 80,
+        "expose": "3000",
+        "cmd": None,
+    },
+    "php": {
+        "detector": ["composer.json"],
+        "secondary": [],
+        "score": 80,
+        "expose": "8000",
         "cmd": None,
     },
 }
 
 
 def detect_stack(store: dict[str, str]) -> Optional[str]:
+    """복수 파일 기반 점수 시스템으로 스택 감지"""
     files = set(Path(p).name for p in store.keys())
 
-    for stack_name, config in STACK_PATTERNS.items():
-        if any(detector in files for detector in config["detector"]):
-            return stack_name
+    scores: dict[str, int] = {}
 
-    return None
+    for stack_name, config in STACK_PATTERNS.items():
+        score = 0
+
+        # Primary detector files
+        for detector in config["detector"]:
+            if detector in files:
+                score += config["score"]
+
+        # Secondary confirmation files
+        for secondary in config.get("secondary", []):
+            if secondary in files:
+                score += config["score"] // 4
+
+        if score > 0:
+            scores[stack_name] = score
+
+    if not scores:
+        return None
+
+    # Return highest score stack
+    return max(scores.items(), key=lambda x: x[1])[0]
 
 
 SYSTEM_PROMPT = """당신은 Dockerfile 최적화 전문가입니다.
@@ -728,6 +816,19 @@ CMD ["java", "-jar", "/app.jar"]
   - 빌드 단계에서 `cp build/libs/*-SNAPSHOT.jar /app.jar`로 단일 파일 복사 후
     `COPY --from=builder /app.jar /app.jar` 사용
 
+## 스택 감지 결과 검증 (필수)
+
+**주의: 시스템이 감지한 스택 정보는 참고용입니다. 반드시 직접 파일을 읽어 검증하세요.**
+
+1. 감지된 스택이 표시되더라도, 반드시 `read_file`로 패키지 매니저 파일(package.json, build.gradle 등)을 읽어 확인
+2. package.json의 dependencies를 확인하여 프레임워크(next, react, vue, express 등) 식별
+3. 감지된 스택과 실제 파일 내용이 다르면 **실제 파일 내용을 우선**
+4. 특히 주의:
+   - Next.js 프로젝트: package.json에 "next" 의존성 + next.config.* 파일 존재
+   - Spring Boot 프로젝트: build.gradle에 "spring-boot" 플러그인 + src/main/java 디렉토리
+   - Flask/FastAPI: requirements.txt에 flask/fastapi 포함
+   - 반드시 read_file로 확인 후 판단
+
 ## 알 수 없는 스택 처리 (필수)
 
 감지된 스택이 없거나 생소한 스택인 경우, 다음 프로세스를 반드시 따르세요:
@@ -793,7 +894,14 @@ class DockerfileGenerator(BaseDockerfileGenerator):
     def _build_stack_info(self) -> str:
         lines = []
         for name, config in self.stack_patterns.items():
-            lines.append(f"- {name}: {config['detector']}")
+            detectors = config.get("detector", [])
+            secondaries = config.get("secondary", [])
+            if detectors:
+                lines.append(f"- {name}: {detectors} (score: {config.get('score', 0)})")
+            elif secondaries:
+                lines.append(
+                    f"- {name}: {secondaries} (fallback, score: {config.get('score', 0)})"
+                )
         return "\n".join(lines)
 
     def _build_detect_info(self, stack: Optional[str]) -> str:
@@ -805,7 +913,63 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         config = self.stack_patterns[stack]
         lines = [f"감지된 스택: {stack}", f"- EXPOSE: {config['expose']}"]
 
-        if stack == "node-static":
+        if stack == "nextjs":
+            lines += [
+                "- CMD: `npm start` 또는 `yarn start` (package.json scripts 확인)",
+                "- **중요**: Next.js는 standalone 빌드가 필요",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
+                "2. **package.json COPY**: `COPY package.json package-lock.json yarn.lock ./`",
+                "3. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "   또는 `RUN yarn install --frozen-lockfile && yarn build && yarn cache clean`",
+                "4. **런타임 스테이지**: `FROM node:22-alpine`",
+                "5. **복사**: `COPY --from=builder /app/.next ./.next`",
+                "   `COPY --from=builder /app/public ./public`",
+                "   `COPY --from=builder /app/node_modules ./node_modules`",
+                "   `COPY --from=builder /app/package.json ./package.json`",
+                "6. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
+                "7. **환경변수 결합**: `ENV NODE_ENV=production`",
+                "8. **비루트 사용자**: `USER appuser`",
+                "9. **CMD**: `CMD ['npm', 'start']` 또는 `CMD ['yarn', 'start']`",
+            ]
+        elif stack == "nuxt":
+            lines += [
+                "- CMD: `npm run start` 또는 `yarn start`",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
+                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "3. **런타임 스테이지**: `FROM node:22-alpine`",
+                "4. **복사**: `COPY --from=builder /app/.output ./.output`",
+                "5. **CMD**: `CMD ['node', '.output/server/index.mjs']`",
+            ]
+        elif stack in ("vue", "svelte", "vite-static"):
+            lines += [
+                f"- CMD: {config.get('cmd', 'serve -s dist -l 3000')}",
+                "- 빌드: `npm run build` → dist/ 생성",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
+                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "3. **런타임 스테이지**: `FROM node:22-alpine`",
+                "4. **복사**: `COPY --from=builder /app/dist ./dist`",
+                "5. **serve 설치 + user**: `RUN npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup`",
+                "6. **CMD**: `CMD ['serve', '-s', 'dist', '-l', '3000']`",
+            ]
+        elif stack == "astro":
+            lines += [
+                "- 빌드: `npm run build` → dist/ 생성",
+                "",
+                "**최적화 가이드 (필수):**",
+                "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
+                "2. **레이어 결합 필수**: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
+                "3. **런타임 스테이지**: `FROM node:22-alpine`",
+                "4. **복사**: `COPY --from=builder /app/dist ./dist`",
+                "5. **serve 설치**: `RUN npm install -g serve`",
+                "6. **CMD**: `CMD ['serve', '-s', 'dist', '-l', '3000']`",
+            ]
+        elif stack == "node-static":
             lines += [
                 f"- CMD: {config['cmd']}",
                 "- 빌드: `npm run build` (또는 yarn build) → dist/ 생성",

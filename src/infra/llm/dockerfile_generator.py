@@ -83,6 +83,22 @@ DOCKERIGNORE_PYTHON = [
     "pip-delete-this-directory.txt",
 ]
 
+DOCKERIGNORE_JAVA_GRADLE = [
+    ".gradle/",
+    "build/",
+    "*.class",
+    "*.war",
+    "*.ear",
+]
+
+DOCKERIGNORE_JAVA_MAVEN = [
+    "target/",
+    "*.class",
+    "*.war",
+    "*.ear",
+    ".mvn/",
+]
+
 
 def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
     lines = list(DOCKERIGNORE_COMMON)
@@ -100,6 +116,12 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
     elif stack and stack.startswith("python"):
         for pattern in DOCKERIGNORE_PYTHON:
             lines.append(pattern)
+    elif stack == "java-gradle":
+        for pattern in DOCKERIGNORE_JAVA_GRADLE:
+            lines.append(pattern)
+    elif stack == "java-maven":
+        for pattern in DOCKERIGNORE_JAVA_MAVEN:
+            lines.append(pattern)
     else:
         if "node_modules" in dirs or "package.json" in files:
             lines.extend(DOCKERIGNORE_NODE)
@@ -109,6 +131,10 @@ def generate_dockerignore(store: dict[str, str], stack: Optional[str]) -> str:
             or "pyproject.toml" in files
         ):
             lines.extend(DOCKERIGNORE_PYTHON)
+        if "build.gradle" in files or "build.gradle.kts" in files or "gradle" in dirs:
+            lines.extend(DOCKERIGNORE_JAVA_GRADLE)
+        if "pom.xml" in files:
+            lines.extend(DOCKERIGNORE_JAVA_MAVEN)
 
     if ".dockerignore" in files:
         lines.insert(0, "# 기존 .dockerignore 참고하여 생성됨")
@@ -425,6 +451,43 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 - Alpine 또는 Slim 베이스 이미지 사용 (node:22-alpine, python:3.12-slim 등)
 - 패키지 설치 후 캐시/임시 파일 정리를 RUN 명령어 내에서 즉시 수행
 
+#### Java Gradle 예시
+```dockerfile
+FROM eclipse-temurin:17-jdk AS builder
+WORKDIR /app
+COPY gradle/ gradle/
+COPY gradlew build.gradle settings.gradle ./
+RUN chmod +x gradlew && ./gradlew build --no-daemon
+COPY src/ src/
+RUN ./gradlew build --no-daemon
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=builder /app/build/libs/*.jar /app.jar
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
+USER appuser
+EXPOSE 8080
+CMD ["java", "-jar", "/app.jar"]
+```
+
+#### Java Maven 예시
+```dockerfile
+FROM eclipse-temurin:17-jdk AS builder
+WORKDIR /app
+COPY pom.xml ./
+RUN mvn dependency:go-offline
+COPY src/ src/
+RUN mvn clean package -DskipTests
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=builder /app/target/*.jar /app.jar
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
+USER appuser
+EXPOSE 8080
+CMD ["java", "-jar", "/app.jar"]
+```
+
 ### 5. 베이스 이미지 검증 (필수)
 - **openjdk 이미지 사용 금지** - Oracle 라이선스 정책 변경으로 Docker Hub에서 제거됨
 - **베이스 이미지는 반드시 검증 필요** - `verify_docker_image` 도구를 사용하여 Docker Hub에서 존재 여부 확인
@@ -458,6 +521,16 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
    - 빌드 스테이지: pip install + cache clean을 하나의 RUN에 결합
    - runner: user 생성 + pycache clean + chown을 하나의 RUN에 결합
    - ENV는 한 줄로 결합: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`
+
+4. **Java Gradle (java-gradle)**
+   - **gradle-wrapper.jar는 빌드에 필수**: COPY 시 반드시 포함
+   - 빌드 스테이지: `COPY gradle/ gradle/` 후 `COPY gradlew build.gradle ./` 후 `RUN ./gradlew build`
+   - .dockerignore에서 `gradle/` 디렉토리 전체를 제외하면 gradle-wrapper.jar가 누락되어 빌드 실패
+   - runner: JRE 베이스 + JAR 복사 + user 생성
+
+5. **Java Maven (java-maven)**
+   - 빌드 스테이지: `COPY pom.xml ./` 후 `COPY src/ src/` 후 `RUN mvn clean package`
+   - runner: JRE 베이스 + JAR 복사 + user 생성
 
 ## 공통 필수 규칙
 
@@ -580,6 +653,12 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "5. **레이어 결합 필수**: `RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app`",
                 "6. **비루트 사용자**: `USER appuser`",
                 "7. **CMD**: `CMD ['java', '-jar', '/app.jar']`",
+                "",
+                "**중요: .dockerignore 규칙**",
+                "- gradle/wrapper/gradle-wrapper.jar 파일은 빌드에 필수입니다.",
+                "- .dockerignore에서 `gradle/` 디렉토리 전체를 제외하면 안 됩니다.",
+                "- build.gradle, settings.gradle, gradlew, gradlew.bat는 제외하지 않습니다.",
+                "- .gradle/, build/, *.class, *.jar(빌드 결과)만 제외합니다.",
             ]
         elif stack == "go":
             lines += [

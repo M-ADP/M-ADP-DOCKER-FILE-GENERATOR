@@ -321,7 +321,10 @@ HUMAN_PROMPT = """다음은 소스코드 디렉토리 구조입니다.
    - 예: verify_docker_image("node:22-alpine"), verify_docker_image("python:3.12-slim")
    - EXISTS 결과를 받으면 해당 이미지를 FROM에 사용
    - NOT_FOUND 결과를 받으면 다른 태그나 이미지를 검색
-5. **package.json 위치를 반영하여 Dockerfile 작성**:
+5. **감지된 패키지 매니저 지침 준수**:
+   - `detect_info`에 명시된 패키지 매니저(npm, yarn, pnpm, bun)와 그에 따른 설치/빌드 명령어를 반드시 사용하세요.
+   - 프로젝트에 존재하지 않는 lockfile을 COPY 하거나 사용하지 마세요.
+6. **package.json 위치를 반영하여 Dockerfile 작성**:
    - `pinball/package.json` → `COPY pinball/package.json pinball/package-lock.json ./`
    - 서브디렉토리의 package.json을 기준으로 WORKDIR과 COPY 경로를 설정하세요
-6. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""
+7. 검증된 베이스 이미지로 Dockerfile을 생성하세요"""

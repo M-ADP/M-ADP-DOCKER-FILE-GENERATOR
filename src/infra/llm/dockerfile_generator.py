@@ -213,6 +213,46 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             return "bun"
         return "npm"
 
+    def _get_pkg_manager_instructions(self, pkg_manager: str) -> str:
+        if pkg_manager == "yarn-berry":
+            return (
+                "**패키지 매니저: Yarn Berry (Yarn 2+) 감지됨**\n"
+                "- `RUN corepack enable`을 사용하세요. (npm install -g yarn 금지)\n"
+                "- 의존성 설치: `yarn install --immutable` (`--frozen-lockfile` 사용 금지)\n"
+                "- 캐시 정리: `yarn cache clean`을 빌드 단계 마지막에 포함\n"
+                "- COPY 필수 파일: `package.json`, `yarn.lock`, `.yarnrc.yml`, `.yarn/releases/`"
+            )
+        elif pkg_manager == "yarn":
+            return (
+                "**패키지 매니저: Yarn Classic 감지됨**\n"
+                "- `RUN npm install -g yarn`으로 설치하세요.\n"
+                "- 의존성 설치: `yarn install --frozen-lockfile`\n"
+                "- 캐시 정리: `yarn cache clean`을 빌드 단계 마지막에 포함\n"
+                "- COPY 필수 파일: `package.json`, `yarn.lock` (pnpm-lock.yaml 등 다른 lockfile 사용 금지)"
+            )
+        elif pkg_manager == "pnpm":
+            return (
+                "**패키지 매니저: pnpm 감지됨**\n"
+                "- `RUN npm install -g pnpm`으로 설치하세요.\n"
+                "- 의존성 설치: `pnpm install --frozen-lockfile`\n"
+                "- 캐시 정리: `pnpm store prune`을 빌드 단계 마지막에 포함\n"
+                "- COPY 필수 파일: `package.json`, `pnpm-lock.yaml` (yarn.lock 등 다른 lockfile 사용 금지)"
+            )
+        elif pkg_manager == "bun":
+            return (
+                "**패키지 매니저: Bun 감지됨**\n"
+                "- `RUN npm install -g bun`으로 설치하세요.\n"
+                "- 의존성 설치: `bun install --frozen-lockfile`\n"
+                "- COPY 필수 파일: `package.json`, `bun.lockb` (또는 bun.lock)"
+            )
+        else:
+            return (
+                "**패키지 매니저: npm 감지됨**\n"
+                "- 의존성 설치: `npm ci --fetch-retries=5` (package-lock.json이 있을 때만)\n"
+                "- 캐시 정리: `npm cache clean --force && rm -rf /root/.npm`을 빌드 단계 마지막에 포함\n"
+                "- COPY 필수 파일: `package.json`, `package-lock.json` (있는 경우)"
+            )
+
     def _build_detect_info(
         self, stack: Optional[str], project_root: str = "", store: Optional[dict[str, str]] = None
     ) -> str:
@@ -225,43 +265,22 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         lines = [f"감지된 스택: {stack}", f"- EXPOSE: {config['expose']}"]
 
         pkg_manager = self._detect_package_manager(store) if store else "npm"
-        if pkg_manager == "yarn-berry":
-            lines.append(
-                "\n⚠️ **Yarn Berry (Yarn 2+) 감지됨** (.yarnrc.yml 존재)\n"
-                "   - npm ci 사용 금지. `npm install -g yarn` 사용 금지.\n"
-                "   - Yarn Berry 설치: `RUN corepack enable`\n"
-                "   - 의존성 설치: `yarn install --immutable` (`--frozen-lockfile` 사용 금지)\n"
-                "   - COPY 시 `.yarnrc.yml`, `.yarn/releases/`, `yarn.lock` 반드시 포함"
-            )
+        lines.append("\n" + self._get_pkg_manager_instructions(pkg_manager))
 
         if stack == "nextjs":
             lines += [
-                "- CMD: `npm start` 또는 `yarn start` 또는 `pnpm start` (package.json scripts 확인)",
+                f"- CMD: `{pkg_manager} start` (package.json scripts 확인)",
                 "- **중요**: Next.js는 standalone 빌드가 필요",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **package.json COPY**: `COPY package.json <실제로 존재하는 lockfile> ./`",
-                "   - package-lock.json이 있으면 npm: `COPY package.json package-lock.json ./`",
-                "   - yarn.lock이 있으면 yarn: `COPY package.json yarn.lock ./`",
-                "   - pnpm-lock.yaml이 있으면 pnpm: `COPY package.json pnpm-lock.yaml ./`",
-                "   - bun.lockb가 있으면 bun: `COPY package.json bun.lockb ./`",
+                f"2. **의존성 COPY**: 위 '패키지 매니저' 섹션의 필수 파일을 COPY 하세요.",
                 "   - 존재하지 않는 lockfile을 COPY에 포함하지 마세요.",
-                "3. **필수 도구 설치**: node:22-alpine에는 npm만 기본, yarn/pnpm/bun은 수동 설치",
-                "   - yarn 사용 시: `RUN npm install -g yarn`",
-                "   - pnpm 사용 시: `RUN npm install -g pnpm`",
-                "   - bun 사용 시: `RUN npm install -g bun`",
-                "   - 또는 corepack 사용: `RUN corepack enable`",
+                "3. **도구 설치 및 의존성 설치**: 위 '패키지 매니저' 지침을 따르세요.",
                 "4. **소스 복사 필수**: `COPY . .` 또는 실제 app/pages/src 경로를 build 전에 COPY",
-                "   - list_tree로 `app/`, `pages/`, `src/app/`, `src/pages/` 중 실제 존재하는 경로를 확인",
-                "   - `COPY package.json yarn.lock ./` 직후 build 실행 금지",
-                "5. **레이어 결합 필수**: package manager에 맞춰 install/build/cache clean을 한 RUN에 결합",
-                "   - npm: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
-                "   - yarn (Classic): `RUN npm install -g yarn && yarn install --frozen-lockfile && yarn build && yarn cache clean`",
-                "   - yarn-berry: `RUN corepack enable && yarn install --immutable && yarn build && yarn cache clean`",
-                "   - pnpm: `RUN pnpm install && pnpm build && pnpm store prune`",
+                "5. **레이어 결합 필수**: install/build/cache clean을 한 RUN에 결합",
                 "6. **런타임 스테이지**: `FROM node:22-alpine`",
-                "7. **pnpm 설치 (runner에도 필요)**: `RUN npm install -g pnpm` 또는 `RUN corepack enable`",
+                f"7. **도구 설치 (runner)**: `{pkg_manager}` 실행에 필요한 도구를 설치하세요.",
                 "8. **복사**: `COPY --from=builder /app/.next ./.next`",
                 "   `COPY --from=builder /app/public ./public`",
                 "   `COPY --from=builder /app/node_modules ./node_modules`",
@@ -269,29 +288,29 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "9. **레이어 결합 필수**: `RUN addgroup -S appgroup && adduser -S appuser -G appgroup && chown -R appuser:appgroup /app`",
                 "10. **환경변수 결합**: `ENV NODE_ENV=production`",
                 "11. **비루트 사용자**: `USER appuser`",
-                "12. **CMD**: `CMD ['npm', 'start']` 또는 `CMD ['yarn', 'start']` 또는 `CMD ['pnpm', 'start']`",
+                f"12. **CMD**: `CMD ['{pkg_manager}', 'start']` (yarn/pnpm의 경우 corepack enable 필요)",
             ]
         elif stack == "nuxt":
             lines += [
-                "- CMD: `npm run start` 또는 `yarn start` 또는 `pnpm start`",
+                f"- CMD: `{pkg_manager} run start` (또는 적절한 실행 명령어)",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **필수 도구 설치**: yarn/pnpm/bun 사용 시 해당 도구 설치",
+                f"2. **도구 및 의존성 설치**: 위 '{pkg_manager}' 지침을 따르세요.",
                 "3. **소스 복사 필수**: build 실행 전에 `COPY . .`",
                 "4. **런타임 스테이지**: `FROM node:22-alpine`",
-                "6. **pnpm 설치 (runner)**: `RUN npm install -g pnpm` 또는 `RUN corepack enable`",
-                "7. **복사**: `COPY --from=builder /app/.output ./.output`",
-                "8. **CMD**: `CMD ['node', '.output/server/index.mjs']`",
+                f"5. **도구 설치 (runner)**: `{pkg_manager}` 실행에 필요한 도구를 설치하세요.",
+                "6. **복사**: `COPY --from=builder /app/.output ./.output`",
+                "7. **CMD**: `CMD ['node', '.output/server/index.mjs']`",
             ]
         elif stack in ("vue", "svelte", "vite-static"):
             lines += [
                 f"- CMD: {config.get('cmd', 'serve -s dist -l 3000')}",
-                "- 빌드: `npm run build` (또는 yarn build, pnpm build) → dist/ 생성",
+                f"- 빌드: `{pkg_manager} run build` → dist/ 생성",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **필수 도구 설치**: yarn/pnpm/bun 사용 시 해당 도구 설치",
+                f"2. **도구 및 의존성 설치**: 위 '{pkg_manager}' 지침을 따르세요.",
                 "3. **소스 복사 필수**: build 실행 전에 `COPY . .`",
                 "4. **런타임 스테이지**: `FROM node:22-alpine`",
                 "5. **복사**: `COPY --from=builder /app/dist ./dist`",
@@ -300,11 +319,11 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             ]
         elif stack == "astro":
             lines += [
-                "- 빌드: `npm run build` (또는 yarn build, pnpm build) → dist/ 생성",
+                f"- 빌드: `{pkg_manager} run build` → dist/ 생성",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **필수 도구 설치**: yarn/pnpm/bun 사용 시 해당 도구 설치",
+                f"2. **도구 및 의존성 설치**: 위 '{pkg_manager}' 지침을 따르세요.",
                 "3. **소스 복사 필수**: build 실행 전에 `COPY . .`",
                 "4. **런타임 스테이지**: `FROM node:22-alpine`",
                 "5. **복사**: `COPY --from=builder /app/dist ./dist`",
@@ -314,14 +333,14 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         elif stack == "node-static":
             lines += [
                 f"- CMD: {config['cmd']}",
-                "- 빌드: `npm run build` (또는 yarn build, pnpm build) → dist/ 생성",
+                f"- 빌드: `{pkg_manager} run build` → dist/ 생성",
                 "- runner: node:22-alpine + serve",
-                "- runner에서 npm ci --production 불필요 (정적 파일만 필요)",
+                f"- runner에서 `{pkg_manager} install --production` 불필요 (정적 파일만 필요)",
                 "- nginx 사용 금지 (외부 설정 파일 의존성 위험)",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **필수 도구 설치**: yarn/pnpm/bun 사용 시 해당 도구 설치",
+                f"2. **도구 및 의존성 설치**: 위 '{pkg_manager}' 지침을 따르세요.",
                 "3. **소스 복사 필수**: build 실행 전에 `COPY . .`",
                 "4. **런타임 스테이지**: `FROM node:22-alpine`",
                 "5. **빌드 결과만 복사**: `COPY --from=builder /app/dist ./dist`",
@@ -332,17 +351,18 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         elif stack == "node-server":
             lines += [
                 "- CMD: package.json의 main 또는 scripts.start를 read_file로 확인 후 결정",
-                "- runner에서 npm ci --production (또는 yarn/pnpm/bun install --production) 필요",
+                f"- runner에서 production 의존성만 포함되도록 설정",
                 "",
                 "**최적화 가이드 (필수):**",
                 "1. **빌드 스테이지**: `FROM node:22-alpine AS builder`",
-                "2. **필수 도구 설치**: yarn/pnpm/bun 사용 시 해당 도구 설치",
-                "3. **런타임 스테이지**: `FROM node:22-alpine`",
-                "4. **production 의존성만**: `COPY --from=builder /app/node_modules ./node_modules`",
-                "5. **소스 코드 복사**: `COPY --from=builder /app/src ./src` (또는 필요한 파일만)",
-                "6. **레이어 결합**: user 생성 + chown",
-                "7. **환경변수 결합**: `ENV NODE_ENV=production`",
-                "8. **비루트 사용자**: `USER appuser`",
+                f"2. **도구 및 의존성 설치**: 위 '{pkg_manager}' 지침을 따르세요. (`--production` 제외하고 전체 설치)",
+                "3. **빌드 또는 소스 준비**: 필요 시 build 수행",
+                "4. **런타임 스테이지**: `FROM node:22-alpine`",
+                f"5. **production 의존성 설치 (선택)**: builder에서 `{pkg_manager} install --production` 후 node_modules만 복사하거나, runner에서 설치",
+                "6. **소스 코드 복사**: `COPY --from=builder /app/src ./src` (또는 필요한 파일만)",
+                "7. **레이어 결합**: user 생성 + chown",
+                "8. **환경변수 결합**: `ENV NODE_ENV=production`",
+                "9. **비루트 사용자**: `USER appuser`",
             ]
         elif stack and stack.startswith("python"):
             lines += [

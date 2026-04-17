@@ -129,13 +129,67 @@ def _route_available_for_workdir(
     return bool(copied_route_paths & expected_paths)
 
 
+def _validate_package_manager_consistency(
+    dockerfile: str,
+    store: dict[str, str],
+) -> list[str]:
+    """Dockerfile에서 사용하는 패키지 매니저가 실제 소스 파일과 일치하는지 검증합니다."""
+    issues = []
+    normalized_paths = [p.replace("\\", "/").lstrip("./") for p in store.keys()]
+    files = set(p.split("/")[-1] for p in normalized_paths)
+
+    # Dockerfile에서 사용된 패키지 매니저 감지
+    used_pnpm = False
+    used_yarn = False
+    used_npm = False
+    used_bun = False
+
+    for _, logical_line in _logical_dockerfile_lines(dockerfile):
+        if not logical_line.startswith("RUN "):
+            continue
+        
+        run_body = logical_line[4:].lower()
+        if re.search(r"\bpnpm\b", run_body):
+            used_pnpm = True
+        if re.search(r"\byarn\b", run_body):
+            used_yarn = True
+        if re.search(r"\bnpm\b", run_body):
+            used_npm = True
+        if re.search(r"\bbun\b", run_body):
+            used_bun = True
+
+    # 실제 소스에 있는 lockfile 확인
+    has_pnpm_lock = "pnpm-lock.yaml" in files
+    has_yarn_lock = "yarn.lock" in files
+    has_package_lock = "package-lock.json" in files
+    has_bun_lock = "bun.lockb" in files or "bun.lock" in files
+
+    if used_pnpm and not has_pnpm_lock:
+        issues.append("Dockerfile uses pnpm but pnpm-lock.yaml is missing in the source")
+    if used_yarn and not has_yarn_lock:
+        issues.append("Dockerfile uses yarn but yarn.lock is missing in the source")
+    if used_bun and not has_bun_lock:
+        issues.append("Dockerfile uses bun but bun.lockb/bun.lock is missing in the source")
+    
+    # npm ci는 package-lock.json이 필수
+    if "npm ci" in dockerfile and not has_package_lock:
+        issues.append("Dockerfile uses 'npm ci' but package-lock.json is missing in the source")
+
+    return issues
+
+
 def _validate_dockerfile_against_source(
     dockerfile: str,
     store: dict[str, str],
     stack: Optional[str],
 ) -> list[str]:
+    issues: list[str] = []
+    
+    # 패키지 매니저 정합성 검증 추가
+    issues.extend(_validate_package_manager_consistency(dockerfile, store))
+
     if stack and not stack.startswith("node") and stack != "nextjs":
-        return []
+        return issues
 
     route_dirs = _discover_next_route_dirs(store)
     if not route_dirs:

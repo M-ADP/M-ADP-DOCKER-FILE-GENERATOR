@@ -195,7 +195,27 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 )
         return "\n".join(lines)
 
-    def _build_detect_info(self, stack: Optional[str], project_root: str = "") -> str:
+    def _detect_package_manager(self, store: dict[str, str]) -> str:
+        """store의 lockfile/설정 파일을 보고 패키지 매니저를 감지합니다."""
+        files = {Path(p).name for p in store.keys()}
+        full_paths = set(store.keys())
+
+        has_yarnrc_yml = any(
+            Path(p).name in (".yarnrc.yml", ".yarnrc.yaml") for p in full_paths
+        )
+        if has_yarnrc_yml:
+            return "yarn-berry"
+        if "yarn.lock" in files:
+            return "yarn"
+        if "pnpm-lock.yaml" in files:
+            return "pnpm"
+        if "bun.lockb" in files or "bun.lock" in files:
+            return "bun"
+        return "npm"
+
+    def _build_detect_info(
+        self, stack: Optional[str], project_root: str = "", store: Optional[dict[str, str]] = None
+    ) -> str:
         if stack is None:
             return (
                 "감지된 스택 없음. 파일을 직접 분석하여 적절한 Dockerfile을 생성하세요."
@@ -203,6 +223,16 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
         config = self.stack_patterns[stack]
         lines = [f"감지된 스택: {stack}", f"- EXPOSE: {config['expose']}"]
+
+        pkg_manager = self._detect_package_manager(store) if store else "npm"
+        if pkg_manager == "yarn-berry":
+            lines.append(
+                "\n⚠️ **Yarn Berry (Yarn 2+) 감지됨** (.yarnrc.yml 존재)\n"
+                "   - npm ci 사용 금지. `npm install -g yarn` 사용 금지.\n"
+                "   - Yarn Berry 설치: `RUN corepack enable`\n"
+                "   - 의존성 설치: `yarn install --immutable` (`--frozen-lockfile` 사용 금지)\n"
+                "   - COPY 시 `.yarnrc.yml`, `.yarn/releases/`, `yarn.lock` 반드시 포함"
+            )
 
         if stack == "nextjs":
             lines += [
@@ -222,12 +252,13 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "   - pnpm 사용 시: `RUN npm install -g pnpm`",
                 "   - bun 사용 시: `RUN npm install -g bun`",
                 "   - 또는 corepack 사용: `RUN corepack enable`",
-                "4. **소스 복사 필수**: `COPY . .` 또는 ���제 app/pages/src 경로를 build 전에 COPY",
+                "4. **소스 복사 필수**: `COPY . .` 또는 실제 app/pages/src 경로를 build 전에 COPY",
                 "   - list_tree로 `app/`, `pages/`, `src/app/`, `src/pages/` 중 실제 존재하는 경로를 확인",
                 "   - `COPY package.json yarn.lock ./` 직후 build 실행 금지",
                 "5. **레이어 결합 필수**: package manager에 맞춰 install/build/cache clean을 한 RUN에 결합",
                 "   - npm: `RUN npm ci && npm run build && npm cache clean --force && rm -rf /root/.npm`",
-                "   - yarn: `RUN yarn install --frozen-lockfile && yarn build && yarn cache clean`",
+                "   - yarn (Classic): `RUN npm install -g yarn && yarn install --frozen-lockfile && yarn build && yarn cache clean`",
+                "   - yarn-berry: `RUN corepack enable && yarn install --immutable && yarn build && yarn cache clean`",
                 "   - pnpm: `RUN pnpm install && pnpm build && pnpm store prune`",
                 "6. **런타임 스테이지**: `FROM node:22-alpine`",
                 "7. **pnpm 설치 (runner에도 필요)**: `RUN npm install -g pnpm` 또는 `RUN corepack enable`",
@@ -309,7 +340,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 "3. **런타임 스테이지**: `FROM node:22-alpine`",
                 "4. **production 의존성만**: `COPY --from=builder /app/node_modules ./node_modules`",
                 "5. **소스 코드 복사**: `COPY --from=builder /app/src ./src` (또는 필요한 파일만)",
-                "6. **레��어 결합**: user 생성 + chown",
+                "6. **레이어 결합**: user 생성 + chown",
                 "7. **환경변수 결합**: `ENV NODE_ENV=production`",
                 "8. **비루트 사용자**: `USER appuser`",
             ]
@@ -489,7 +520,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 content=HUMAN_PROMPT.format(
                     tree=tree,
                     context=context,
-                    detect_info=self._build_detect_info(stack, project_root),
+                    detect_info=self._build_detect_info(stack, project_root, store),
                 )
             ),
         ]

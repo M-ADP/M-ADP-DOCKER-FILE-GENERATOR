@@ -38,6 +38,25 @@ EXPOSE 3000
 CMD ["serve", "-s", "dist", "-l", "3000"]
 ```
 
+#### Node.js Yarn Berry 정적 빌드 예시 (.yarnrc.yml 존재 시)
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package.json yarn.lock .yarnrc.yml ./
+COPY .yarn/releases/ .yarn/releases/
+COPY . .
+RUN corepack enable && yarn install --immutable && yarn build && yarn cache clean
+
+FROM node:22-alpine
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+RUN corepack enable && npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup
+ENV NODE_ENV=production
+USER appuser
+EXPOSE 3000
+CMD ["serve", "-s", "dist", "-l", "3000"]
+```
+
 #### Node.js 서버 예시
 ```dockerfile
 FROM node:22-alpine AS builder
@@ -142,10 +161,14 @@ CMD ["java", "-jar", "/app.jar"]
 
 ### Node.js 패키지 매니저 사용 시 필수
 - **node:22-alpine에는 npm만 기본 설치됨** (yarn, pnpm, bun은 기본 설치되지 않음)
-- yarn.lock이 있으면: `RUN npm install -g yarn` 후 `yarn install ...`
-- pnpm-lock.yaml이 있으면: `RUN npm install -g pnpm` 후 `pnpm install ...`
-- bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install ...`
-- 명령어 실행 시 해당 패키지 매니저가 설치되어 있는지 확인하고, 없으면 설치 후 사용
+- **.yarnrc.yml이 있으면 Yarn Berry (Yarn 2+)**: `RUN corepack enable` 후 `yarn install --immutable`
+  - **`npm install -g yarn` 사용 금지** — Yarn Berry는 corepack으로 관리됨
+  - **`--frozen-lockfile` 사용 금지** — Yarn Berry에서는 `--immutable` 사용
+  - COPY 시 `.yarnrc.yml`, `.yarn/releases/`, `yarn.lock` 반드시 포함
+- yarn.lock만 있고 .yarnrc.yml이 없으면 Yarn Classic: `RUN npm install -g yarn` 후 `yarn install --frozen-lockfile`
+- pnpm-lock.yaml이 있으면: `RUN npm install -g pnpm` 후 `pnpm install --frozen-lockfile`
+- bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install --frozen-lockfile`
+- **package-lock.json이 없으면 npm ci 사용 금지** — 해당 lockfile의 패키지 매니저를 사용할 것
 
 1. **Node.js 정적 빌드 (node-static)**
    - 빌드 스테이지: npm ci + npm run build + cache clean을 하나의 RUN에 결합
@@ -216,6 +239,9 @@ CMD ["java", "-jar", "/app.jar"]
 - 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
 - Node/Next.js에서 build를 애플리케이션 소스 COPY 전에 실행 금지
 - 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정
+- **package-lock.json 없이 npm ci 사용 금지** → yarn/pnpm/bun lockfile이 있으면 해당 패키지 매니저 사용
+- **.yarnrc.yml 있을 때 `npm install -g yarn` 사용 금지** → `corepack enable` 사용
+- **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용
 - **Java JAR 와일드카드 금지**: `COPY --from=builder /app/build/libs/*.jar /app.jar` 금지
   - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
   - 와일드카드를 단일 파일에 복사하면 Docker/Kaniko 에러 발생

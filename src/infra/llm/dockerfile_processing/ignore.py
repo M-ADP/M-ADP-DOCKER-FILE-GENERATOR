@@ -10,11 +10,9 @@ from src.infra.llm.dockerfile_processing.constants import (
     DOCKERIGNORE_JAVA_MAVEN,
     DOCKERIGNORE_NODE,
     DOCKERIGNORE_PYTHON,
-    OPTIONAL_NODE_COPY_FILES,
 )
 from src.infra.llm.dockerfile_processing.copy import _parse_copy_sources
 from src.infra.llm.dockerfile_processing.paths import (
-    _is_available_source,
     _is_build_required_path,
     _normalize_source_path,
 )
@@ -92,6 +90,7 @@ def _remove_missing_optional_copy_sources(
     store: dict[str, str],
 ) -> str:
     available_paths = set(store.keys())
+    normalized_available = {_normalize_source_path(p) for p in available_paths}
     lines = dockerfile.split("\n")
     result: list[str] = []
 
@@ -126,26 +125,39 @@ def _remove_missing_optional_copy_sources(
         kept_sources: list[str] = []
         removed_sources: list[str] = []
         for source in sources:
-            source_path = _normalize_source_path(source)
-            source_name = Path(source_path).name
-            is_optional_node_file = (
-                source_path in OPTIONAL_NODE_COPY_FILES
-                or source_name in OPTIONAL_NODE_COPY_FILES
-            )
-            if is_optional_node_file and not _is_available_source(
-                source,
-                available_paths,
+            source_normalized = _normalize_source_path(source)
+
+            # 루트 복사, 글로브, 명시적 디렉토리는 항상 유지
+            if (
+                not source_normalized
+                or source_normalized == "."
+                or "*" in source_normalized
+                or "?" in source_normalized
+                or source.rstrip().endswith("/")
             ):
-                removed_sources.append(source)
+                kept_sources.append(source)
                 continue
-            kept_sources.append(source)
+
+            # 스토어에 파일로 존재하는 경우 유지
+            if source_normalized in normalized_available:
+                kept_sources.append(source)
+                continue
+
+            # 스토어에 디렉토리 내용이 있는 경우 유지
+            dir_prefix = source_normalized.rstrip("/") + "/"
+            if any(p.startswith(dir_prefix) for p in normalized_available):
+                kept_sources.append(source)
+                continue
+
+            # 스토어에 존재하지 않는 소스 제거
+            removed_sources.append(source)
 
         if not removed_sources:
             result.append(line)
             continue
 
         logger.warning(
-            "[Dockerfile] Removed missing optional COPY sources: %s",
+            "[Dockerfile] Removed missing COPY sources: %s",
             ", ".join(removed_sources),
         )
         if not kept_sources:

@@ -36,8 +36,15 @@ class SpecGenerator:
             ),
         ]
 
+        logger.info(f"[SpecGenerator] calling LLM (stack_hint={stack_hint}, project_root='{project_root}')")
         response = await self._llm.client.ainvoke(messages)
-        return self._parse_response(response.content)
+        spec = self._parse_response(response.content)
+        logger.info(
+            f"[SpecGenerator] detected_stack={spec.detected_stack}, "
+            f"pkg_manager={spec.pkg_manager}, stages={[s.name for s in spec.stages]}, "
+            f"project_root='{spec.project_root}'"
+        )
+        return spec
 
     def _parse_response(self, content: str) -> BuildSpec:
         raw = content if isinstance(content, str) else str(content)

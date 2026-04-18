@@ -1,8 +1,11 @@
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
+
+logger = logging.getLogger(__name__)
 
 
 class StackDetector:
@@ -19,7 +22,13 @@ class StackDetector:
         self._score_node_stacks(scores, files, package_names, package_scripts, package_jsons)
         self._score_other_stacks(scores, files)
 
-        return max(scores.items(), key=lambda x: x[1])[0] if scores else None
+        if not scores:
+            logger.info("[StackDetector] no stack detected")
+            return None
+        top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
+        result = top[0][0]
+        logger.info(f"[StackDetector] detected={result}, top_scores={top}")
+        return result
 
     @staticmethod
     def _load_package_jsons(store: dict[str, str]) -> list[dict]:

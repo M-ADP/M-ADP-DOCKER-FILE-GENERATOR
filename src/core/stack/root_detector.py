@@ -1,7 +1,10 @@
+import logging
 from typing import Optional
 
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
 from src.infra.llm.dockerfile_processing.paths import _normalize_source_path
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectRootDetector:
@@ -39,7 +42,10 @@ class ProjectRootDetector:
                 candidate_dirs[parent] = depth
 
         if not candidate_dirs:
+            logger.info("[ProjectRootDetector] no root detected, using ''")
             return ""
 
         shallowest = min(candidate_dirs.items(), key=lambda x: x[1])[0]
-        return (shallowest + "/") if shallowest else ""
+        result = (shallowest + "/") if shallowest else ""
+        logger.info(f"[ProjectRootDetector] project_root='{result}', candidates={list(candidate_dirs.keys())}")
+        return result

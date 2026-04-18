@@ -1,4 +1,5 @@
 import logging
+import time
 
 from fastapi import Depends
 
@@ -30,6 +31,8 @@ class GenerateDockerfileUseCase(BaseUseCase):
         self.generator = generator
 
     async def __call__(self, tar_bytes: bytes) -> tuple[str, str, int]:
+        t_start = time.monotonic()
+
         store = self.collector.extract_store(tar_bytes)
         if not store:
             raise NoSourceFilesError()
@@ -50,4 +53,10 @@ class GenerateDockerfileUseCase(BaseUseCase):
         except Exception as e:
             raise DockerfileGenerationError() from e
 
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            f"[GenerateDockerfile] done in {elapsed_ms}ms, "
+            f"port={port}, "
+            f"dockerfile_lines={len(result.strip().splitlines())}"
+        )
         return result.strip(), dockerignore.strip(), port

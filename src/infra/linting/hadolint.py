@@ -32,7 +32,14 @@ class HadolintValidator:
                 proc.communicate(input=dockerfile.encode()),
                 timeout=self._TIMEOUT,
             )
-            return self._parse(stdout.decode())
+            issues = self._parse(stdout.decode())
+            errors   = [i for i in issues if i.severity == "error"]
+            warnings = [i for i in issues if i.severity == "warning"]
+            logger.info(
+                f"[Hadolint] issues={len(issues)} (errors={len(errors)}, warnings={len(warnings)})"
+                + (f", blocking={[f'{i.code} L{i.line}' for i in errors]}" if errors else "")
+            )
+            return issues
         except FileNotFoundError:
             logger.warning("[Hadolint] hadolint 바이너리를 찾을 수 없습니다. 검증을 건너뜁니다.")
             return []

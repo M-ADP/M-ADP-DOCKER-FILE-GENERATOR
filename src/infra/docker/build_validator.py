@@ -87,7 +87,6 @@ class DockerBuildValidator:
             "--local", f"context={context_dir}",
             "--local", f"dockerfile={context_dir}",
             "--opt", "target=builder",
-            "--output", "type=cacheonly",
             "--progress", "plain",
             "--no-cache",
             stdout=asyncio.subprocess.PIPE,

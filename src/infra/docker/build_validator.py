@@ -80,6 +80,14 @@ class DockerBuildValidator:
     async def _run_build(self, context_dir: str) -> BuildResult:
         start = time.monotonic()
         logger.info(f"[BuildValidator] buildctl addr={_BUILDKIT_ADDR}")
+        try:
+            dockerfile_content = (Path(context_dir) / "Dockerfile").read_text()
+            logger.info(
+                "[BuildValidator] Dockerfile to validate:\n%s",
+                dockerfile_content,
+            )
+        except Exception:
+            pass
         proc = await asyncio.create_subprocess_exec(
             "buildctl", "--addr", _BUILDKIT_ADDR,
             "build",

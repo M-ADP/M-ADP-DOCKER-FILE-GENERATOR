@@ -1,5 +1,8 @@
+import logging
 import re
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Fixers — (dockerfile: str) -> str
@@ -21,47 +24,61 @@ _ROOT_ONLY_RUN = re.compile(
     re.IGNORECASE,
 )
 
+def _move_user_to_end_of_stage(dockerfile: str) -> str:
+    """USER <non-root>를 각 스테이지의 CMD/ENTRYPOINT 바로 앞으로 이동.
 
-def _fix_root_cmds_after_user(dockerfile: str) -> str:
-    """USER <non-root> 이후에 오는 root 전용 RUN(chown/adduser/mkdir 등)을 USER 앞으로 이동.
-
-    LLM이 자주 생성하는 잘못된 패턴:
-      USER appuser
-      RUN chown -R appuser:appgroup /app    ← non-root 불가
-      RUN mkdir /home/appuser               ← non-root 불가
-      RUN adduser -S ...                    ← non-root 불가
+    root 명령 탐지 대신 USER 자체를 스테이지 끝으로 밀어서,
+    모든 RUN이 root 권한으로 실행되도록 보장한다.
     """
     lines = dockerfile.split("\n")
+    stage_starts = [i for i, line in enumerate(lines) if line.strip().startswith("FROM ")]
+    if not stage_starts:
+        return dockerfile
+    stage_starts.append(len(lines))
 
-    user_indices = [
-        i for i, line in enumerate(lines)
-        if re.match(r"\s*USER\s+(?!root\b)\S", line.strip())
-    ]
+    result: list[str] = []
+    for start, end in zip(stage_starts, stage_starts[1:]):
+        stage = lines[start:end]
 
-    for user_idx in reversed(user_indices):
-        root_indices = []
-        for j in range(user_idx + 1, len(lines)):
-            stripped = lines[j].strip()
-            if stripped.startswith("FROM "):
+        # 이 스테이지의 첫 번째 USER <non-root> 찾기
+        user_local_idx: int | None = None
+        user_line: str | None = None
+        for i, line in enumerate(stage):
+            stripped = line.strip()
+            if re.match(r"USER\s+(?!root\b|0\b)\S", stripped):
+                user_local_idx = i
+                user_line = line
                 break
-            if _ROOT_ONLY_RUN.search(stripped):
-                root_indices.append(j)
 
-        if not root_indices:
+        if user_line is None or user_local_idx is None:
+            result.extend(stage)
             continue
 
-        root_lines = [lines[j] for j in root_indices]
-        skip = set(root_indices)
-        new_lines = []
-        for i, line in enumerate(lines):
-            if i in skip:
-                continue
-            if i == user_idx:
-                new_lines.extend(root_lines)
-            new_lines.append(line)
-        lines = new_lines
+        # USER 제거
+        stage_no_user = [ln for i, ln in enumerate(stage) if i != user_local_idx]
 
-    return "\n".join(lines)
+        # CMD / ENTRYPOINT 앞에 삽입 (없으면 스테이지 끝에 추가)
+        insert_at: int | None = None
+        for i, line in enumerate(stage_no_user):
+            stripped = line.strip()
+            if re.match(r"(CMD|ENTRYPOINT)[\s\[]", stripped):
+                insert_at = i
+                break
+
+        if insert_at is not None:
+            stage_no_user.insert(insert_at, user_line)
+        else:
+            stage_no_user.append(user_line)
+
+        logger.info(
+            "[StackFixer] USER '%s' moved to idx %s in stage starting '%s'",
+            user_line.strip(),
+            insert_at if insert_at is not None else "end",
+            stage[0].strip()[:60],
+        )
+        result.extend(stage_no_user)
+
+    return "\n".join(result)
 
 
 def _fix_invalid_corepack(dockerfile: str) -> str:
@@ -254,20 +271,26 @@ def _validate_dep_copy_before_install(
 
 
 def _validate_user_before_root_cmds(dockerfile: str) -> list[str]:
-    """USER <non-root> 이후에 root 전용 명령(chown/adduser/mkdir 등)이 오는지 감지."""
+    """USER <non-root> 이후에 root 전용 명령(chown/adduser/mkdir 등)이 오는지 감지.
+
+    _move_user_to_end_of_stage 이후에도 남아있으면 LLM이 비정상 패턴을 생성한 것.
+    """
     user_switched = False
     for line in dockerfile.splitlines():
         stripped = line.strip()
-        if re.match(r"USER\s+(?!root\b)\S", stripped):
+        if stripped.startswith("FROM "):
+            user_switched = False
+        if re.match(r"USER\s+(?!root\b|0\b)\S", stripped):
             user_switched = True
         if user_switched and _ROOT_ONLY_RUN.search(stripped):
             return [
                 "permission denied 위험: USER <non-root> 이후에 chown/adduser/mkdir 등 "
                 "root 전용 명령이 실행됩니다.\n"
-                "올바른 Alpine 패턴 (USER 전환 전에 모두 처리):\n"
-                "  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser "
-                "&& chown -R appuser:appgroup /app\n"
-                "  USER appuser"
+                "올바른 Alpine 패턴:\n"
+                "  RUN addgroup -S appgroup && adduser -S -H -G appgroup appuser "
+                "&& mkdir -p /app && chown -R appuser:appgroup /app\n"
+                "  CMD [\"entrypoint\"]\n"
+                "  USER appuser  ← 반드시 CMD/ENTRYPOINT 바로 앞"
             ]
     return []
 
@@ -315,10 +338,10 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
-    _fix_root_cmds_after_user,  # USER <non-root> 이후 chown/adduser/mkdir → USER 앞으로 이동
-    _fix_alpine_adduser_home,   # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
-    _fix_invalid_corepack,      # corepack prepare --destination 존재하지 않는 플래그 교정
-    _fix_nginx_cmd,             # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
+    _move_user_to_end_of_stage,  # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
+    _fix_alpine_adduser_home,    # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
+    _fix_invalid_corepack,       # corepack prepare --destination 존재하지 않는 플래그 교정
+    _fix_nginx_cmd,              # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
 ]
 
 _UNIVERSAL_VALIDATORS: list[Callable[[str], list[str]]] = [

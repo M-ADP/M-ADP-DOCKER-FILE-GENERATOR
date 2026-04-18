@@ -13,8 +13,11 @@ FROM alpine:3.19 AS tools
 ARG NERDCTL_VERSION=2.0.3
 RUN apk add --no-cache curl && \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
-    curl -fsSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-${NERDCTL_VERSION}-linux-${ARCH}.tar.gz" | \
-    tar xzf - -C /usr/local/bin nerdctl
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+      "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-${NERDCTL_VERSION}-linux-${ARCH}.tar.gz" \
+      -o /tmp/nerdctl.tar.gz && \
+    tar xzf /tmp/nerdctl.tar.gz -C /usr/local/bin nerdctl && \
+    rm /tmp/nerdctl.tar.gz
 
 FROM python:3.12-slim
 

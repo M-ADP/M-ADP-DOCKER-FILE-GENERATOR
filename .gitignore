@@ -58,11 +58,12 @@ logs/
 !.env.example
 
 # Distribution / packaging
-MANIFEST
+/MANIFEST
+/MANIFEST.in
 
 # FastAPI / Uvicorn
 *.pid
 .claude
 .env
 
-agent
+/agent

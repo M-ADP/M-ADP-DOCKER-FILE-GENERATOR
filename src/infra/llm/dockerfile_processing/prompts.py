@@ -170,10 +170,12 @@ CMD ["java", "-jar", "/app.jar"]
 - bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install --frozen-lockfile`
 - **package-lock.json이 없으면 npm ci 사용 금지** — 해당 lockfile의 패키지 매니저를 사용할 것
 
-1. **Node.js 정적 빌드 (node-static)**
-   - 빌드 스테이지: npm ci + npm run build + cache clean을 하나의 RUN에 결합
-   - runner: serve 설치 + user 생성을 하나의 RUN에 결합
-   - nginx 사용 금지
+1. **Node.js / Vite 정적 빌드 (node-static, vite-static)**
+   - 빌드 스테이지: npm install + npm run build + cache clean을 하나의 RUN에 결합
+   - runner: `node:22-alpine` + `serve` 고정 (nginx / alpine+apk 패턴 절대 금지)
+   - runner CMD: `["npx", "serve", "-s", "dist", "-l", "3000"]` 또는 `serve` 전역 설치 후 `["serve", "-s", "dist", "-l", "3000"]`
+   - EXPOSE: 3000
+   - runner RUN: `npm install -g serve && addgroup -S appgroup && adduser -S appuser -G appgroup`
 
 2. **Node.js 서버 (node-server)**
    - 빌드 스테이지: npm ci + cache clean을 하나의 RUN에 결합
@@ -184,6 +186,11 @@ CMD ["java", "-jar", "/app.jar"]
    - 빌드 스테이지: pip install + cache clean을 하나의 RUN에 결합
    - runner: user 생성 + pycache clean + chown을 하나의 RUN에 결합
    - ENV는 한 줄로 결합: `ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1`
+   - **runner stage COPY 필수 순서** (반드시 세 줄 모두 포함):
+     1. `COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages`
+     2. `COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn` (uvicorn 사용 시)
+     3. `COPY --from=builder /app ./`
+   - site-packages 없이 /app만 복사하면 런타임에 fastapi/uvicorn 등 모든 의존성이 누락됨
 
 4. **Java Gradle (java-gradle)**
    - **gradle-wrapper.jar는 빌드에 필수**: COPY 시 반드시 포함
@@ -242,6 +249,9 @@ CMD ["java", "-jar", "/app.jar"]
 - **package-lock.json 없이 npm ci 사용 금지** → yarn/pnpm/bun lockfile이 있으면 해당 패키지 매니저 사용
 - **.yarnrc.yml 있을 때 `npm install -g yarn` 사용 금지** → `corepack enable` 사용
 - **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용
+- **node-static/vite-static에서 nginx 사용 금지** → 반드시 `node:22-alpine` + `serve` 사용
+- **alpine + apk add nginx 패턴 금지** → nginx가 필요하면 `nginx:alpine` 이미지 사용
+- **nginx CMD에 `-c /path/nginx.conf` 사용 금지** → nginx.conf 파일이 이미지에 없으면 런타임 에러
 - **Java JAR 와일드카드 금지**: `COPY --from=builder /app/build/libs/*.jar /app.jar` 금지
   - Gradle/Maven 빌드는 *.jar로 여러 JAR 생성 (예: app.jar + app-plain.jar)
   - 와일드카드를 단일 파일에 복사하면 Docker/Kaniko 에러 발생

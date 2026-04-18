@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from src.core.manifest.models import ManifestInfo
+
 
 class BaseDockerfileGenerator(ABC):
     @abstractmethod
@@ -7,6 +9,6 @@ class BaseDockerfileGenerator(ABC):
         self,
         store: dict[str, str],
         tree: str,
-        context: str,
+        manifest: ManifestInfo,
     ) -> tuple[str, str, int]:
         raise NotImplementedError

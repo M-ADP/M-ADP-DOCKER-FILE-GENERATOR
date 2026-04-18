@@ -196,7 +196,9 @@ def _merge_env_layers(dockerfile: str) -> str:
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("ENV "):
-            pending_envs.append(stripped[4:])
+            env_val = stripped[4:].rstrip("\\").strip()
+            if env_val:
+                pending_envs.append(env_val)
         else:
             flush_envs()
             merged_lines.append(line)

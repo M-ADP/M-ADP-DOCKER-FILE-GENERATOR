@@ -184,8 +184,8 @@ def _validate_dockerfile_against_source(
     stack: Optional[str],
 ) -> list[str]:
     issues: list[str] = []
-    
-    # 패키지 매니저 정합성 검증 추가
+
+    # 패키지 매니저 정합성 검증
     issues.extend(_validate_package_manager_consistency(dockerfile, store))
 
     if stack and not stack.startswith("node") and stack != "nextjs":
@@ -251,12 +251,51 @@ def _validate_copy_coverage(
     if not normalized_root:
         return []
 
+    _COVERAGE_SKIP_NAMES = frozenset({
+        "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        ".dockerignore", ".gitignore", ".gitattributes", ".gitmodules",
+        "readme.md", "readme.rst", "readme.txt", "readme",
+        "license", "license.md", "license.txt", "changelog.md",
+        "makefile", "justfile", ".editorconfig", ".prettierrc",
+        ".eslintrc", ".eslintrc.js", ".eslintrc.json",
+        ".env.example", ".env.sample",
+        "tsconfig.json", "jsconfig.json",
+    })
+
+    # *.config.(js|ts|mjs|cjs), *.config.json, jest/vitest/playwright config 등
+    _CONFIG_SUFFIXES = (
+        ".config.js", ".config.ts", ".config.mjs", ".config.cjs",
+        ".config.json", ".config.yaml", ".config.yml",
+        "rc.js", "rc.ts", "rc.mjs", "rc.cjs", "rc.json",
+    )
+
+    def _is_coverage_required(path: str) -> bool:
+        name = path.rsplit("/", 1)[-1].lower()
+        if name in _COVERAGE_SKIP_NAMES:
+            return False
+        if name.startswith("docker-compose"):
+            return False
+        # tsconfig.app.json, tsconfig.node.json 등 변형
+        if name.startswith("tsconfig") and name.endswith(".json"):
+            return False
+        # *.config.*, *rc.* 패턴 — 빌드 툴링 설정 파일
+        if any(name.endswith(suf) for suf in _CONFIG_SUFFIXES):
+            return False
+        # hidden files that are not lockfiles
+        if name.startswith(".") and name not in {
+            ".python-version", ".nvmrc", ".node-version", ".ruby-version",
+            ".tool-versions",
+        }:
+            return False
+        return True
+
     # 프로젝트 루트 하위 store 파일 수집
     files_under_root: set[str] = set()
     for path in store.keys():
         normalized = _normalize_source_path(path)
         if normalized == normalized_root or normalized.startswith(normalized_root + "/"):
-            files_under_root.add(normalized)
+            if _is_coverage_required(normalized):
+                files_under_root.add(normalized)
 
     if not files_under_root:
         return []

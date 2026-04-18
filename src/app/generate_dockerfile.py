@@ -3,19 +3,17 @@ import logging
 from fastapi import Depends
 
 from src.app.base_usecase import BaseUseCase
-from src.core.agents.priority_analysis import PriorityAnalysisAgent
 from src.core.exceptions import DockerfileGenerationError, NoSourceFilesError
 from src.core.generators import BaseDockerfileGenerator
 from src.core.guards import CompositeSecurityGuard
+from src.core.manifest.parser import ManifestParser
 from src.core.source.collector import SourceCollector
 from src.deps.get_composite_guard import get_composite_guard
 from src.deps.get_dockerfile_generator import get_dockerfile_generator
-from src.deps.get_priority_agent import get_priority_agent
+from src.deps.get_manifest_parser import get_manifest_parser
 from src.deps.get_source_collector import get_source_collector
 
 logger = logging.getLogger(__name__)
-
-MAX_CONTEXT_FILES = 20
 
 
 class GenerateDockerfileUseCase(BaseUseCase):
@@ -23,12 +21,12 @@ class GenerateDockerfileUseCase(BaseUseCase):
         self,
         security_guard: CompositeSecurityGuard = Depends(get_composite_guard),
         collector: SourceCollector = Depends(get_source_collector),
-        priority_agent: PriorityAnalysisAgent = Depends(get_priority_agent),
+        manifest_parser: ManifestParser = Depends(get_manifest_parser),
         generator: BaseDockerfileGenerator = Depends(get_dockerfile_generator),
     ):
         self.security_guard = security_guard
         self.collector = collector
-        self.priority_agent = priority_agent
+        self.manifest_parser = manifest_parser
         self.generator = generator
 
     async def __call__(self, tar_bytes: bytes) -> tuple[str, str, int]:
@@ -37,26 +35,16 @@ class GenerateDockerfileUseCase(BaseUseCase):
             raise NoSourceFilesError()
 
         tree = self.collector.build_tree(store)
-        priority_paths = self.priority_agent.get_priority_paths(store, max_priority=3)
-
-        context_parts: list[str] = []
-        for path in priority_paths[:MAX_CONTEXT_FILES]:
-            content = store.get(path)
-            if content:
-                context_parts.append(f"=== {path} ===\n{content}")
-
-        context = ""
-        if context_parts:
-            context = "[우선순위 높은 파일들]\n" + "\n\n".join(context_parts)
+        manifest = self.manifest_parser.parse(store)
 
         logger.info(
-            f"[GenerateDockerfile] files={len(store)}, priority_files={len(priority_paths)}"
+            f"[GenerateDockerfile] files={len(store)}, "
+            f"language={manifest.language}, "
+            f"pkg_manager={manifest.pkg_manager}"
         )
 
         try:
-            result, dockerignore, port = await self.generator.generate(
-                store, tree, context
-            )
+            result, dockerignore, port = await self.generator.generate(store, tree, manifest)
             self.security_guard.validate_dockerfile(result)
             self.security_guard.validate_dockerignore(dockerignore)
         except Exception as e:

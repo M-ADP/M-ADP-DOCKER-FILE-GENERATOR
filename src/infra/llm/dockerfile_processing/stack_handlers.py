@@ -6,12 +6,13 @@ from typing import Callable
 # ---------------------------------------------------------------------------
 
 def _fix_invalid_corepack(dockerfile: str) -> str:
-    """corepack prepare <pkg>@... --destination=... 패턴을 corepack enable로 교정.
+    """corepack prepare 뒤에 --activate 외의 잘못된 플래그를 제거한다.
 
-    --destination 플래그는 corepack에 존재하지 않는 옵션이다.
+    유효한 플래그: --activate, --json, --output, -o
+    잘못된 예: --destination, --binary, --global, 기타 미지원 옵션
     """
     return re.sub(
-        r"corepack\s+prepare\s+\S+\s+--destination\S*",
+        r"corepack\s+prepare\s+\S+\s+--(?!activate\b|json\b|output\b)\S*",
         "corepack enable",
         dockerfile,
     )

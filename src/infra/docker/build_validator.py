@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -9,6 +10,9 @@ from tempfile import TemporaryDirectory
 logger = logging.getLogger(__name__)
 
 _BUILD_TIMEOUT = 180
+_BUILDKIT_ADDR = os.environ.get(
+    "BUILDKIT_HOST", "tcp://buildkitd.jenkins.svc.cluster.local:1234"
+)
 _ERROR_KEYWORDS = (
     "error:",
     "failed to",
@@ -38,20 +42,19 @@ class DockerBuildValidator:
         dockerfile: str,
         store: dict[str, str],
     ) -> BuildResult:
-        if not await self._is_nerdctl_available():
-            logger.info("[BuildValidator] nerdctl 없음, 빌드 검증 건너뜁니다.")
+        if not await self._is_buildctl_available():
+            logger.info("[BuildValidator] buildctl 접근 불가, 빌드 검증 건너뜁니다.")
             return BuildResult(success=True)
         with TemporaryDirectory() as tmpdir:
             self._write_store(tmpdir, store)
-            dockerfile_path = self._write_dockerfile(tmpdir, dockerfile)
-            return await self._run_build(tmpdir, dockerfile_path)
+            self._write_dockerfile(tmpdir, dockerfile)
+            return await self._run_build(tmpdir)
 
     @staticmethod
-    async def _is_nerdctl_available() -> bool:
+    async def _is_buildctl_available() -> bool:
         try:
-            # nerdctl info는 containerd 소켓까지 실제로 확인함
             proc = await asyncio.create_subprocess_exec(
-                "nerdctl", "info",
+                "buildctl", "--addr", _BUILDKIT_ADDR, "debug", "workers",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -71,21 +74,22 @@ class DockerBuildValidator:
                 logger.warning(f"[BuildValidator] 파일 쓰기 실패: {path} — {e}")
 
     @staticmethod
-    def _write_dockerfile(tmpdir: str, dockerfile: str) -> Path:
-        path = Path(tmpdir) / "Dockerfile"
-        path.write_text(dockerfile, encoding="utf-8")
-        return path
+    def _write_dockerfile(tmpdir: str, dockerfile: str) -> None:
+        (Path(tmpdir) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
-    async def _run_build(self, context_dir: str, dockerfile_path: Path) -> BuildResult:
+    async def _run_build(self, context_dir: str) -> BuildResult:
         start = time.monotonic()
+        logger.info(f"[BuildValidator] buildctl addr={_BUILDKIT_ADDR}")
         proc = await asyncio.create_subprocess_exec(
-            "nerdctl", "build",
-            "--file", str(dockerfile_path),
-            "--target", "builder",
+            "buildctl", "--addr", _BUILDKIT_ADDR,
+            "build",
+            "--frontend", "dockerfile.v0",
+            "--local", f"context={context_dir}",
+            "--local", f"dockerfile={context_dir}",
+            "--opt", "target=builder",
             "--output", "type=cacheonly",
             "--progress", "plain",
             "--no-cache",
-            context_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

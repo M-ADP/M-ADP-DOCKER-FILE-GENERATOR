@@ -56,6 +56,13 @@ VALID_DOCKERFILE_INSTRUCTIONS = {
 }
 
 
+_DOCKERFILE_INSTRUCTIONS_TUPLE = (
+    "FROM ", "RUN ", "COPY ", "ADD ", "ENV ", "EXPOSE ", "WORKDIR ",
+    "USER ", "CMD ", "ENTRYPOINT ", "ARG ", "LABEL ", "VOLUME ",
+    "HEALTHCHECK ", "SHELL ", "STOPSIGNAL ", "ONBUILD ", "MAINTAINER ", "#",
+)
+
+
 def _normalize_continuation_lines(dockerfile: str) -> str:
     """RUN 명령어의 백슬래시 continuation을 단일 라인으로 정규화"""
     lines = dockerfile.split("\n")
@@ -69,53 +76,30 @@ def _normalize_continuation_lines(dockerfile: str) -> str:
             if current_run:
                 result.append("RUN " + " ".join(current_run))
                 current_run = []
-
             cmd = stripped[4:]
             if cmd.endswith("\\"):
-                cmd = cmd[:-1].rstrip()
-                current_run.append(cmd)
+                current_run.append(cmd[:-1].rstrip())
             else:
                 result.append(line)
+
         elif current_run:
-            if stripped and not stripped.startswith(
-                (
-                    "FROM ",
-                    "COPY ",
-                    "WORKDIR ",
-                    "ENV ",
-                    "EXPOSE ",
-                    "USER ",
-                    "CMD ",
-                    "ENTRYPOINT ",
-                    "#",
-                )
-            ):
+            # 빈 줄: continuation 중 공백 줄은 무시하고 계속 수집
+            if not stripped:
+                continue
+
+            # Dockerfile 명령어가 나오면 → flush 후 해당 명령어 처리
+            if stripped.startswith(_DOCKERFILE_INSTRUCTIONS_TUPLE):
+                result.append("RUN " + " ".join(current_run))
+                current_run = []
+                result.append(line)
+            else:
+                # 이어지는 셸 명령어
                 if stripped.endswith("\\"):
                     current_run.append(stripped[:-1].rstrip())
                 else:
                     current_run.append(stripped)
                     result.append("RUN " + " ".join(current_run))
                     current_run = []
-            else:
-                if stripped.startswith(
-                    (
-                        "FROM ",
-                        "COPY ",
-                        "WORKDIR ",
-                        "ENV ",
-                        "EXPOSE ",
-                        "USER ",
-                        "CMD ",
-                        "ENTRYPOINT ",
-                    )
-                ):
-                    result.append("RUN " + " ".join(current_run))
-                    current_run = []
-                    result.append(line)
-                else:
-                    result.append("RUN " + " ".join(current_run))
-                    current_run = []
-                    result.append(line)
         else:
             result.append(line)
 
@@ -126,34 +110,45 @@ def _normalize_continuation_lines(dockerfile: str) -> str:
 
 
 def _remove_invalid_lines(dockerfile: str) -> str:
-    """Dockerfile 명령어 형식에 맞지 않는 라인 제거"""
+    """Dockerfile 명령어 형식에 맞지 않는 라인 제거.
+
+    _normalize_continuation_lines 이후에도 남아있는 \ 연속 컨텍스트를 추적해
+    continuation 줄은 절대 삭제하지 않는다.
+    """
     lines = dockerfile.split("\n")
     result: list[str] = []
+    in_continuation = False  # 이전 줄이 \로 끝났는가
 
     for line in lines:
         stripped = line.strip()
+
         if not stripped:
             result.append(line)
+            # 빈 줄은 continuation을 끊지 않는다 (LLM이 빈 줄 삽입 시 보호)
             continue
 
-        # FROM 라인은 항상 유지
+        # \ continuation 컨텍스트 안에 있으면 무조건 유지
+        if in_continuation:
+            result.append(line)
+            in_continuation = stripped.endswith("\\")
+            continue
+
         if stripped.startswith("FROM ") or stripped.startswith("FROM\t"):
             result.append(line)
+            in_continuation = False
             continue
 
-        # 다른 유효한 명령어 확인
         first_word = stripped.split()[0].upper() if stripped.split() else ""
 
         if first_word in VALID_DOCKERFILE_INSTRUCTIONS:
             result.append(line)
+            in_continuation = stripped.endswith("\\")
             continue
 
-        # 한글이 포함된 라인 제거
         if re.search(r"[가-힣]", stripped):
             logger.warning(f"[Dockerfile] Removed Korean line: {stripped[:50]}...")
             continue
 
-        # 유효하지 않은 라인 제거
         logger.warning(f"[Dockerfile] Removed invalid line: {stripped[:50]}...")
 
     return "\n".join(result)

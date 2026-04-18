@@ -122,6 +122,19 @@ class RetryLoop:
             ) if project_root else "list_tree로 파일 구조를 다시 확인하세요."
             return f"이전 Dockerfile 수정 필요:\n{error}\n\n힌트: {hint}\nDockerfile만 다시 생성하세요."
 
+        if "permission denied" in error.lower():
+            return (
+                f"이전 Dockerfile 빌드 중 권한 오류:\n{error}\n\n"
+                "힌트: USER <non-root> 전환 이후에 RUN mkdir, adduser, useradd 등을 실행하면 권한 오류가 발생합니다.\n"
+                "올바른 순서:\n"
+                "  1. USER 전환 전에 root 권한으로 사용자/그룹 생성 및 디렉토리 준비\n"
+                "  2. COPY --chown=user:group 으로 소유권 설정\n"
+                "  3. 마지막에 USER <non-root> 로 전환\n"
+                "Alpine 예시: RUN addgroup -S appgroup && adduser -S appuser -G appgroup\n"
+                "Debian 예시: RUN groupadd -r appgroup && useradd -r -g appgroup appuser\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
         if "corepack prepare" in error or "corepack" in error.lower() and "--destination" in error:
             return (
                 f"이전 Dockerfile 수정 필요:\n{error}\n\n"

@@ -16,6 +16,51 @@ def _fix_alpine_adduser_home(dockerfile: str) -> str:
     return re.sub(r"adduser\s+[^&\n;|]*-S[^&\n;|]*", _add_no_home, dockerfile)
 
 
+def _fix_chown_after_user(dockerfile: str) -> str:
+    """USER <non-root> 이후에 오는 단독 RUN chown을 USER 바로 앞으로 이동한다.
+
+    LLM이 생성하는 잘못된 패턴:
+      USER appuser
+      RUN chown -R appuser:appgroup /app  ← non-root로는 chown 불가
+
+    교정 후:
+      RUN chown -R appuser:appgroup /app
+      USER appuser
+    """
+    lines = dockerfile.split("\n")
+
+    # 뒤에서부터 처리해야 인덱스 변동이 없음
+    user_indices = [
+        i for i, line in enumerate(lines)
+        if re.match(r"\s*USER\s+(?!root\b)\S", line.strip())
+    ]
+
+    for user_idx in reversed(user_indices):
+        chown_indices = []
+        for j in range(user_idx + 1, len(lines)):
+            stripped = lines[j].strip()
+            if stripped.startswith("FROM "):
+                break
+            if re.match(r"RUN\s+chown\b", stripped):
+                chown_indices.append(j)
+
+        if not chown_indices:
+            continue
+
+        chown_lines = [lines[j] for j in chown_indices]
+        skip = set(chown_indices)
+        new_lines = []
+        for i, line in enumerate(lines):
+            if i in skip:
+                continue
+            if i == user_idx:
+                new_lines.extend(chown_lines)
+            new_lines.append(line)
+        lines = new_lines
+
+    return "\n".join(lines)
+
+
 def _fix_invalid_corepack(dockerfile: str) -> str:
     """corepack prepare 뒤에 --activate 외의 잘못된 플래그를 제거한다.
 
@@ -206,19 +251,21 @@ def _validate_dep_copy_before_install(
 
 
 def _validate_user_before_adduser(dockerfile: str) -> list[str]:
-    """USER <non-root> 전환 이후에 adduser/useradd 등이 나오는지 감지."""
+    """USER <non-root> 전환 이후에 adduser/chown 등 root 권한 필요 명령이 나오는지 감지."""
     user_switched = False
     for line in dockerfile.splitlines():
         stripped = line.strip()
         if re.match(r"USER\s+(?!root\b)\S", stripped):
             user_switched = True
-        if user_switched and re.search(r"\b(adduser|addgroup|useradd|groupadd)\b", stripped):
+        if user_switched and re.search(
+            r"\b(adduser|addgroup|useradd|groupadd|chown)\b", stripped
+        ):
             return [
-                "permission denied 위험: USER <non-root> 이후에 adduser/useradd가 실행됩니다. "
-                "사용자 생성은 반드시 USER 전환 전에 root 권한으로 해야 합니다.\n"
+                "permission denied 위험: USER <non-root> 이후에 adduser/chown이 실행됩니다. "
+                "사용자 생성과 chown은 반드시 USER 전환 전 root 권한으로 실행해야 합니다.\n"
                 "올바른 Alpine 패턴:\n"
-                "  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser\n"
-                "  COPY --chown=appuser:appgroup . /app\n"
+                "  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser "
+                "&& chown -R appuser:appgroup /app\n"
                 "  USER appuser"
             ]
     return []
@@ -267,6 +314,7 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
+    _fix_chown_after_user,     # USER <non-root> 이후 RUN chown → USER 앞으로 이동
     _fix_alpine_adduser_home,  # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
     _fix_invalid_corepack,     # corepack prepare --destination 존재하지 않는 플래그 교정
     _fix_nginx_cmd,            # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것

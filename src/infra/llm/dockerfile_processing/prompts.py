@@ -234,20 +234,18 @@ CMD ["java", "-jar", "/app.jar"]
 
   **Alpine (node:22-alpine, python:3.12-alpine 등):**
   ```
-  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser
-  COPY --chown=appuser:appgroup . /app
+  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser && chown -R appuser:appgroup /app
   USER appuser
   ```
   - `-H` 필수: 홈 디렉토리를 생성하지 않음 → `/home/appuser` permission denied 방지
-  - `adduser`/`addgroup`은 반드시 `USER appuser` 전에 root 권한으로 실행
+  - `chown`을 반드시 같은 RUN 블록에 포함 — `USER appuser` 이후 `RUN chown`은 permission denied
 
   **Debian/Ubuntu (python:3.12-slim, node:22 등):**
   ```
-  RUN groupadd -r appgroup && useradd -r -g appgroup appuser
-  COPY --chown=appuser:appgroup . /app
+  RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
   USER appuser
   ```
-  - `useradd`/`groupadd`는 반드시 `USER appuser` 전에 root 권한으로 실행
+  - `chown`을 반드시 같은 RUN 블록에 포함 — `USER appuser` 이후 `RUN chown`은 permission denied
 
 ### 네트워크 안정성
 - `npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000`

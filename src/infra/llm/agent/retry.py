@@ -95,6 +95,33 @@ class RetryLoop:
 
     @staticmethod
     def _build_retry_message(error: str, project_root: str) -> str:
+        if "site-packages" in error:
+            return (
+                f"이전 Dockerfile 수정 필요:\n{error}\n\n"
+                "힌트: runner stage에 다음 세 줄을 반드시 추가하세요:\n"
+                "  COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+                "  COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn\n"
+                "  COPY --from=builder /app ./\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
+        if "pip install 전에" in error:
+            return (
+                f"이전 Dockerfile 수정 필요:\n{error}\n\n"
+                "힌트: pip install RUN 명령 바로 앞에 `COPY requirements.txt ./` 를 추가하세요.\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
+        if "COPY에서 누락" in error:
+            hint = (
+                f"소스 파일이 `{project_root}` 서브디렉토리 아래에 있습니다. "
+                f"COPY 경로에 반드시 서브디렉토리 prefix를 포함하세요.\n"
+                f"  올바른 예: COPY {project_root}requirements.txt .\n"
+                f"  또는:     COPY {project_root} .\n"
+                f"  잘못된 예: COPY requirements.txt ."
+            ) if project_root else "list_tree로 파일 구조를 다시 확인하세요."
+            return f"이전 Dockerfile 수정 필요:\n{error}\n\n힌트: {hint}\nDockerfile만 다시 생성하세요."
+
         if "정적 검증" in error or "source" in error.lower():
             hint = (
                 f"COPY {project_root} . 를 사용해 전체 디렉토리를 복사하세요."

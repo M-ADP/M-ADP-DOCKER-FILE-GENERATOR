@@ -171,6 +171,65 @@ def _remove_missing_optional_copy_sources(
     return "\n".join(result)
 
 
+_UNWANTED_COPY_NAMES = frozenset({
+    "dockerfile", ".dockerignore", ".gitignore", ".gitattributes",
+    "docker-compose.yml", "docker-compose.yaml",
+})
+
+
+def _remove_unwanted_copy_sources(dockerfile: str) -> str:
+    """소스 컨텍스트에 존재하더라도 컨테이너에 복사하면 안 되는 파일을 COPY 명령에서 제거합니다."""
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("COPY ") or "--from=" in stripped:
+            result.append(line)
+            continue
+
+        try:
+            tokens = shlex.split(stripped)
+        except ValueError:
+            result.append(line)
+            continue
+
+        if len(tokens) < 3:
+            result.append(line)
+            continue
+
+        option_tokens: list[str] = []
+        source_start = 1
+        while source_start < len(tokens) and tokens[source_start].startswith("--"):
+            option_tokens.append(tokens[source_start])
+            source_start += 1
+
+        sources = tokens[source_start:-1]
+        destination = tokens[-1]
+        if not sources:
+            result.append(line)
+            continue
+
+        kept: list[str] = []
+        for src in sources:
+            name = Path(src).name.lower()
+            if name in _UNWANTED_COPY_NAMES or name.startswith("docker-compose"):
+                logger.warning("[Dockerfile] Removed unwanted COPY source: %s", src)
+            else:
+                kept.append(src)
+
+        if not kept:
+            continue
+
+        if len(kept) == len(sources):
+            result.append(line)
+        else:
+            indent = line[: len(line) - len(line.lstrip())]
+            result.append(" ".join([f"{indent}COPY", *option_tokens, *kept, destination]))
+
+    return "\n".join(result)
+
+
 def _reconcile_dockerignore_with_dockerfile(
     dockerignore: str,
     dockerfile: str,

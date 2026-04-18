@@ -49,8 +49,9 @@ class DockerBuildValidator:
     @staticmethod
     async def _is_nerdctl_available() -> bool:
         try:
+            # nerdctl info는 containerd 소켓까지 실제로 확인함
             proc = await asyncio.create_subprocess_exec(
-                "nerdctl", "version",
+                "nerdctl", "info",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )

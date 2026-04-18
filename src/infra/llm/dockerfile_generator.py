@@ -17,6 +17,7 @@ from src.infra.llm.docker_hub_verifier import DockerHubVerifier
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
 from src.infra.llm.dockerfile_processing.ignore import (
     _remove_missing_optional_copy_sources,
+    _remove_unwanted_copy_sources,
     generate_dockerignore,
 )
 from src.infra.llm.dockerfile_processing.prompts import HUMAN_PROMPT, SYSTEM_PROMPT
@@ -86,6 +87,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             spec=spec,
         )
 
+        dockerfile = _remove_unwanted_copy_sources(dockerfile)
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
         dockerignore = generate_dockerignore(store, stack, dockerfile)
         port = self._extract_port(dockerfile, stack)

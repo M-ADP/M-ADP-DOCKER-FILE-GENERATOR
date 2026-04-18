@@ -5,6 +5,17 @@ from typing import Callable
 # Fixers — (dockerfile: str) -> str
 # ---------------------------------------------------------------------------
 
+def _fix_alpine_adduser_home(dockerfile: str) -> str:
+    """Alpine adduser -S 호출에 -H 추가 — 홈 디렉토리 생성을 막아 permission denied 방지."""
+    def _add_no_home(m: re.Match) -> str:
+        cmd = m.group(0)
+        if "-H" in cmd:
+            return cmd
+        return re.sub(r"(-S\b)", r"\1 -H", cmd, count=1)
+
+    return re.sub(r"adduser\s+[^&\n;|]*-S[^&\n;|]*", _add_no_home, dockerfile)
+
+
 def _fix_invalid_corepack(dockerfile: str) -> str:
     """corepack prepare 뒤에 --activate 외의 잘못된 플래그를 제거한다.
 
@@ -194,6 +205,25 @@ def _validate_dep_copy_before_install(
     return _validator
 
 
+def _validate_user_before_adduser(dockerfile: str) -> list[str]:
+    """USER <non-root> 전환 이후에 adduser/useradd 등이 나오는지 감지."""
+    user_switched = False
+    for line in dockerfile.splitlines():
+        stripped = line.strip()
+        if re.match(r"USER\s+(?!root\b)\S", stripped):
+            user_switched = True
+        if user_switched and re.search(r"\b(adduser|addgroup|useradd|groupadd)\b", stripped):
+            return [
+                "permission denied 위험: USER <non-root> 이후에 adduser/useradd가 실행됩니다. "
+                "사용자 생성은 반드시 USER 전환 전에 root 권한으로 해야 합니다.\n"
+                "올바른 Alpine 패턴:\n"
+                "  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser\n"
+                "  COPY --chown=appuser:appgroup . /app\n"
+                "  USER appuser"
+            ]
+    return []
+
+
 def _validate_corepack_usage(dockerfile: str) -> list[str]:
     """잘못된 corepack prepare --destination 패턴 감지."""
     if re.search(r"corepack\s+prepare.*--destination", dockerfile):
@@ -237,13 +267,15 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
-    _fix_invalid_corepack,  # corepack prepare --destination 존재하지 않는 플래그 교정
-    _fix_nginx_cmd,         # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
+    _fix_alpine_adduser_home,  # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
+    _fix_invalid_corepack,     # corepack prepare --destination 존재하지 않는 플래그 교정
+    _fix_nginx_cmd,            # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
 ]
 
 _UNIVERSAL_VALIDATORS: list[Callable[[str], list[str]]] = [
-    _validate_corepack_usage,  # 잘못된 corepack 패턴 → 재시도 트리거
-    _validate_nginx_conf_ref,  # nginx.conf 참조 누락은 스택 무관한 버그
+    _validate_user_before_adduser,  # USER 전환 후 adduser → permission denied 방지
+    _validate_corepack_usage,       # 잘못된 corepack 패턴 → 재시도 트리거
+    _validate_nginx_conf_ref,       # nginx.conf 참조 누락은 스택 무관한 버그
 ]
 
 _ruby_validator = _validate_dep_copy_before_install(

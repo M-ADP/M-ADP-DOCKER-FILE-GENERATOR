@@ -230,7 +230,24 @@ CMD ["java", "-jar", "/app.jar"]
 - WORKDIR /app 고정
 - EXPOSE 포트 명시
 - COPY 명령어는 소스와 목적지 사이에 공백 포함
-- 비루트 사용자 필수 설정
+- **비루트 사용자 필수 설정 — 반드시 아래 순서를 지킬 것**:
+
+  **Alpine (node:22-alpine, python:3.12-alpine 등):**
+  ```
+  RUN addgroup -S appgroup && adduser -S -G appgroup -H appuser
+  COPY --chown=appuser:appgroup . /app
+  USER appuser
+  ```
+  - `-H` 필수: 홈 디렉토리를 생성하지 않음 → `/home/appuser` permission denied 방지
+  - `adduser`/`addgroup`은 반드시 `USER appuser` 전에 root 권한으로 실행
+
+  **Debian/Ubuntu (python:3.12-slim, node:22 등):**
+  ```
+  RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+  COPY --chown=appuser:appgroup . /app
+  USER appuser
+  ```
+  - `useradd`/`groupadd`는 반드시 `USER appuser` 전에 root 권한으로 실행
 
 ### 네트워크 안정성
 - `npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000`
@@ -249,6 +266,8 @@ CMD ["java", "-jar", "/app.jar"]
 - 분리된 ENV 명령어 금지 → 반드시 한 줄로 결합
 - Node/Next.js에서 build를 애플리케이션 소스 COPY 전에 실행 금지
 - 루트 유저로 실행 금지 → 반드시 비루트 사용자 설정
+- **`USER <non-root>` 전환 이후 `adduser`/`addgroup`/`useradd`/`groupadd` 실행 금지** → permission denied 발생
+- **Alpine에서 `adduser -S` 사용 시 `-H` 없이 사용 금지** → `/home/<user>` 생성 시도로 permission denied 발생
 - **package-lock.json 없이 npm ci 사용 금지** → yarn/pnpm/bun lockfile이 있으면 해당 패키지 매니저 사용
 - **.yarnrc.yml 있을 때 `npm install -g yarn` 사용 금지** → `corepack enable` 사용
 - **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용

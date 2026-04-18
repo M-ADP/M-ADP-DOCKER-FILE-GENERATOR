@@ -122,6 +122,16 @@ class RetryLoop:
             ) if project_root else "list_tree로 파일 구조를 다시 확인하세요."
             return f"이전 Dockerfile 수정 필요:\n{error}\n\n힌트: {hint}\nDockerfile만 다시 생성하세요."
 
+        if "corepack prepare" in error or "corepack" in error.lower() and "--destination" in error:
+            return (
+                f"이전 Dockerfile 수정 필요:\n{error}\n\n"
+                "힌트: `corepack prepare --destination`은 존재하지 않는 플래그입니다.\n"
+                "올바른 pnpm 패턴:\n"
+                "  `RUN corepack enable && pnpm install --frozen-lockfile`\n"
+                "  또는: `RUN npm install -g pnpm && pnpm install --frozen-lockfile`\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
         if "정적 검증" in error or "source" in error.lower():
             hint = (
                 f"COPY {project_root} . 를 사용해 전체 디렉토리를 복사하세요."

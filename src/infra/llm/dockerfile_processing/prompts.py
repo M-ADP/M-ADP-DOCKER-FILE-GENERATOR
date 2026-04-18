@@ -166,7 +166,10 @@ CMD ["java", "-jar", "/app.jar"]
   - **`--frozen-lockfile` 사용 금지** — Yarn Berry에서는 `--immutable` 사용
   - COPY 시 `.yarnrc.yml`, `.yarn/releases/`, `yarn.lock` 반드시 포함
 - yarn.lock만 있고 .yarnrc.yml이 없으면 Yarn Classic: `RUN npm install -g yarn` 후 `yarn install --frozen-lockfile`
-- pnpm-lock.yaml이 있으면: `RUN npm install -g pnpm` 후 `pnpm install --frozen-lockfile`
+- pnpm-lock.yaml이 있으면 (두 가지 중 하나 선택):
+  - package.json에 `"packageManager": "pnpm@x.y.z"` 필드가 있으면: `RUN corepack enable && pnpm install --frozen-lockfile`
+  - 없으면: `RUN npm install -g pnpm && pnpm install --frozen-lockfile`
+  - **`corepack prepare pnpm@latest --destination=...` 절대 금지** — `--destination`은 존재하지 않는 플래그
 - bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install --frozen-lockfile`
 - **package-lock.json이 없으면 npm ci 사용 금지** — 해당 lockfile의 패키지 매니저를 사용할 것
 
@@ -249,6 +252,7 @@ CMD ["java", "-jar", "/app.jar"]
 - **package-lock.json 없이 npm ci 사용 금지** → yarn/pnpm/bun lockfile이 있으면 해당 패키지 매니저 사용
 - **.yarnrc.yml 있을 때 `npm install -g yarn` 사용 금지** → `corepack enable` 사용
 - **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용
+- **`corepack prepare --destination` 사용 금지** — 존재하지 않는 플래그. pnpm은 `corepack enable && pnpm install --frozen-lockfile` 또는 `npm install -g pnpm && pnpm install --frozen-lockfile` 사용
 - **node-static/vite-static에서 nginx 사용 금지** → 반드시 `node:22-alpine` + `serve` 사용
 - **alpine + apk add nginx 패턴 금지** → nginx가 필요하면 `nginx:alpine` 이미지 사용
 - **nginx CMD에 `-c /path/nginx.conf` 사용 금지** → nginx.conf 파일이 이미지에 없으면 런타임 에러

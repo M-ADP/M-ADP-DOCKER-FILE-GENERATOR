@@ -5,6 +5,18 @@ from typing import Callable
 # Fixers — (dockerfile: str) -> str
 # ---------------------------------------------------------------------------
 
+def _fix_invalid_corepack(dockerfile: str) -> str:
+    """corepack prepare <pkg>@... --destination=... 패턴을 corepack enable로 교정.
+
+    --destination 플래그는 corepack에 존재하지 않는 옵션이다.
+    """
+    return re.sub(
+        r"corepack\s+prepare\s+\S+\s+--destination\S*",
+        "corepack enable",
+        dockerfile,
+    )
+
+
 def _fix_nginx_cmd(dockerfile: str) -> str:
     dockerfile = re.sub(
         r'(CMD\s*\["nginx"[^\]]*?),?\s*"-c",\s*"[^"]*nginx\.conf"([^\]]*\])',
@@ -181,6 +193,18 @@ def _validate_dep_copy_before_install(
     return _validator
 
 
+def _validate_corepack_usage(dockerfile: str) -> list[str]:
+    """잘못된 corepack prepare --destination 패턴 감지."""
+    if re.search(r"corepack\s+prepare.*--destination", dockerfile):
+        return [
+            "잘못된 corepack 패턴: `corepack prepare --destination`은 존재하지 않는 플래그입니다.\n"
+            "올바른 pnpm 패턴: `corepack enable && pnpm install --frozen-lockfile`\n"
+            "올바른 yarn berry 패턴: `corepack enable && yarn install --immutable`\n"
+            "또는 npm 방식: `npm install -g pnpm && pnpm install --frozen-lockfile`"
+        ]
+    return []
+
+
 def _validate_nginx_conf_ref(dockerfile: str) -> list[str]:
     m = re.search(r'CMD\s*\[.*?"nginx".*?"-c",\s*"([^"]+)"', dockerfile)
     if not m:
@@ -212,10 +236,12 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
-    _fix_nginx_cmd,  # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
+    _fix_invalid_corepack,  # corepack prepare --destination 존재하지 않는 플래그 교정
+    _fix_nginx_cmd,         # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
 ]
 
 _UNIVERSAL_VALIDATORS: list[Callable[[str], list[str]]] = [
+    _validate_corepack_usage,  # 잘못된 corepack 패턴 → 재시도 트리거
     _validate_nginx_conf_ref,  # nginx.conf 참조 누락은 스택 무관한 버그
 ]
 

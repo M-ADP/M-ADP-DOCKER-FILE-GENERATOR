@@ -616,11 +616,77 @@ def _resolve_stack_handlers(registry: dict, stack: str | None) -> list:
     return list(registry.get(prefix, []))
 
 
+_NEXTJS_STANDALONE_COPY = re.compile(
+    r"COPY\s+--from=\S+\s+\S+/\.next/standalone\s+", re.IGNORECASE
+)
+
+
+def _fix_nextjs_standalone_without_config(
+    dockerfile: str, store: dict[str, str]
+) -> str:
+    """standalone COPY가 있지만 next.config에 output: 'standalone'이 없으면 교정.
+
+    next build는 output: 'standalone' 설정 없이는 .next/standalone을 생성하지 않으므로
+    COPY --from=builder /app/.next/standalone이 빌드 실패를 유발한다.
+    → COPY --from=builder /app ./ + CMD ["node_modules/.bin/next", "start"] 으로 교정.
+    """
+    from pathlib import Path as _Path
+    if not _NEXTJS_STANDALONE_COPY.search(dockerfile):
+        return dockerfile
+
+    config_names = ("next.config.ts", "next.config.js", "next.config.mjs", "next.config.cjs")
+    config_contents = [v for k, v in store.items() if _Path(k).name in config_names]
+    if any("standalone" in c for c in config_contents):
+        return dockerfile
+
+    logger.warning(
+        "[StackFixer] next.config에 output: 'standalone' 없는데 standalone COPY 감지 — "
+        "일반 .next 방식으로 교정"
+    )
+
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+    standalone_copied = False
+
+    for line in lines:
+        stripped = line.strip()
+        indent = line[: len(line) - len(line.lstrip())]
+
+        # COPY --from=... /path/.next/standalone ./ → COPY --from=... /app ./
+        m = re.match(r"(COPY\s+--from=\S+)\s+\S+/\.next/standalone\s+(\./?)", stripped, re.IGNORECASE)
+        if m:
+            result.append(f"{indent}{m.group(1)} /app {m.group(2)}")
+            standalone_copied = True
+            logger.info("[StackFixer] standalone COPY → COPY --from=... /app ./")
+            continue
+
+        # COPY --from=... /path/.next/static ./.next/static → 제거 (/app에 이미 포함됨)
+        if re.match(r"COPY\s+--from=\S+\s+\S+/\.next/static\b", stripped, re.IGNORECASE) and standalone_copied:
+            logger.info("[StackFixer] removed redundant .next/static COPY")
+            continue
+
+        # CMD ["node", "server.js"] → CMD ["node_modules/.bin/next", "start"]
+        if re.match(r'CMD\s*\["node",\s*"server\.js"\]', stripped, re.IGNORECASE):
+            result.append(f'{indent}CMD ["node_modules/.bin/next", "start"]')
+            logger.info("[StackFixer] CMD node server.js → next start")
+            continue
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def apply_stack_fixers(dockerfile: str, stack: str | None) -> str:
     for fixer in _UNIVERSAL_FIXERS:
         dockerfile = fixer(dockerfile)
     for fixer in _resolve_stack_handlers(_STACK_FIXERS, stack):
         dockerfile = fixer(dockerfile)
+    return dockerfile
+
+
+def apply_store_fixers(dockerfile: str, store: dict[str, str], stack: str | None) -> str:
+    """store 내용을 참조해야 하는 fixers (next.config 등)."""
+    dockerfile = _fix_nextjs_standalone_without_config(dockerfile, store)
     return dockerfile
 
 

@@ -7,7 +7,10 @@ from src.core.spec.models import BuildSpec
 from src.infra.docker.build_validator import BuildResult, DockerBuildValidator
 from src.infra.linting.hadolint import HadolintIssue, HadolintValidator
 from src.infra.llm.agent.loop import AgentLoop
-from src.infra.llm.dockerfile_processing.stack_handlers import collect_stack_issues
+from src.infra.llm.dockerfile_processing.stack_handlers import (
+    apply_store_fixers,
+    collect_stack_issues,
+)
 from src.infra.llm.dockerfile_processing.source_validator import (
     _validate_copy_coverage,
     _validate_dockerfile_against_source,
@@ -43,6 +46,7 @@ class RetryLoop:
         for attempt in range(MAX_AGENT_RETRIES):
             try:
                 result = await self._agent_loop.run(messages, tools, stack=stack)
+                result = apply_store_fixers(result, store, stack)
 
                 feedback = self._collect_static_feedback(result, store, stack, project_root)
                 if feedback:

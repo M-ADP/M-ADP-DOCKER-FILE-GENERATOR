@@ -77,26 +77,41 @@ class DockerBuildValidator:
     def _write_dockerfile(tmpdir: str, dockerfile: str) -> None:
         (Path(tmpdir) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
+    @staticmethod
+    def _build_target(dockerfile_content: str) -> str | None:
+        """Dockerfile에 AS builder 스테이지가 있으면 'builder', 없으면 None."""
+        for line in dockerfile_content.splitlines():
+            if re.match(r"FROM\s+\S+\s+AS\s+builder\b", line.strip(), re.IGNORECASE):
+                return "builder"
+        return None
+
     async def _run_build(self, context_dir: str) -> BuildResult:
         start = time.monotonic()
         logger.info(f"[BuildValidator] buildctl addr={_BUILDKIT_ADDR}")
+
+        dockerfile_content = ""
         try:
             dockerfile_content = (Path(context_dir) / "Dockerfile").read_text()
-            logger.info(
-                "[BuildValidator] Dockerfile to validate:\n%s",
-                dockerfile_content,
-            )
+            logger.info("[BuildValidator] Dockerfile to validate:\n%s", dockerfile_content)
         except Exception:
             pass
-        proc = await asyncio.create_subprocess_exec(
+
+        target = self._build_target(dockerfile_content)
+        logger.info("[BuildValidator] build target=%s", target)
+
+        cmd = [
             "buildctl", "--addr", _BUILDKIT_ADDR,
             "build",
             "--frontend", "dockerfile.v0",
             "--local", f"context={context_dir}",
             "--local", f"dockerfile={context_dir}",
-            "--opt", "target=builder",
             "--progress", "plain",
-            "--no-cache",
+        ]
+        if target:
+            cmd += ["--opt", f"target={target}"]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -126,7 +141,12 @@ class DockerBuildValidator:
         errors: list[str] = []
         for line in stderr.splitlines():
             stripped = line.strip()
-            if any(kw in stripped.lower() for kw in _ERROR_KEYWORDS):
+            low = stripped.lower()
+            # BuildKit 진행 메시지(#N DONE / #N exporting)는 제외
+            if re.match(r"#\d+\s+(done|exporting|sending|resolving|pulling|mounting|unpacking)", low):
+                continue
+            if any(kw in low for kw in _ERROR_KEYWORDS):
                 clean = re.sub(r"^#\d+\s+", "", stripped)
                 errors.append(clean)
+        logger.debug("[BuildValidator] parsed errors: %s", errors)
         return errors[:10]

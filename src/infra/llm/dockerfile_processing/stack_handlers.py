@@ -144,6 +144,7 @@ def _fix_invalid_corepack(dockerfile: str) -> str:
     1. corepack prepare --<invalid-flag>  → corepack enable
     2. corepack enable /path/...          → corepack enable
        (경로를 packageManager 이름으로 오해하는 LLM 패턴)
+    3. corepack enable && corepack enable → corepack enable (중복 제거)
     """
     # corepack prepare --<invalid> 교정
     dockerfile = re.sub(
@@ -154,6 +155,12 @@ def _fix_invalid_corepack(dockerfile: str) -> str:
     # corepack enable /absolute/path → corepack enable
     dockerfile = re.sub(
         r"corepack\s+enable\s+/\S+",
+        "corepack enable",
+        dockerfile,
+    )
+    # corepack enable && corepack enable (중복) → corepack enable
+    dockerfile = re.sub(
+        r"corepack\s+enable(?:\s*&&\s*corepack\s+enable)+",
         "corepack enable",
         dockerfile,
     )

@@ -16,13 +16,16 @@ _BUILDKIT_ADDR = os.environ.get(
 _ERROR_KEYWORDS = (
     "error:",
     "failed to",
-    "not found",
     "cannot find",
-    "no such file",
-    "permission denied",
+    "no such file or directory",
     "exit code",
     "npm err",
+    "err_",        # ERR_PNPM_NO_PKG_MANIFEST 등 패키지 매니저 에러 코드
     "error -",
+)
+# 빌드 중 발생하는 런타임 노이즈 — Dockerfile 구조 오류가 아니므로 제외
+_ERROR_KEYWORDS_EXCLUDE = (
+    "permission denied",  # npm/pnpm 캐시 디렉토리 접근 실패 등 노이즈 — Dockerfile 구조 오류 아님
 )
 
 
@@ -138,15 +141,32 @@ class DockerBuildValidator:
 
     @staticmethod
     def _parse_errors(stderr: str) -> list[str]:
-        errors: list[str] = []
+        primary: list[str] = []   # BuildKit #N ERROR: 라인 (가장 직접적인 원인)
+        secondary: list[str] = [] # 키워드 매칭 보조 에러
+
         for line in stderr.splitlines():
             stripped = line.strip()
             low = stripped.lower()
-            # BuildKit 진행 메시지(#N DONE / #N exporting)는 제외
+
+            # BuildKit 진행 메시지 제외
             if re.match(r"#\d+\s+(done|exporting|sending|resolving|pulling|mounting|unpacking)", low):
                 continue
+
+            # 노이즈 제외 — 런타임 부산물
+            if any(kw in low for kw in _ERROR_KEYWORDS_EXCLUDE):
+                continue
+
+            # #N ERROR: ... 패턴 — 실제 빌드 실패 원인
+            if re.match(r"#\d+\s+error:", low):
+                clean = re.sub(r"^#\d+\s+", "", stripped)
+                primary.append(clean)
+                continue
+
             if any(kw in low for kw in _ERROR_KEYWORDS):
                 clean = re.sub(r"^#\d+\s+", "", stripped)
-                errors.append(clean)
-        logger.debug("[BuildValidator] parsed errors: %s", errors)
-        return errors[:10]
+                secondary.append(clean)
+
+        errors = (primary + secondary)[:10]
+        logger.debug("[BuildValidator] parsed errors (primary=%d, secondary=%d): %s",
+                     len(primary), len(secondary), errors)
+        return errors

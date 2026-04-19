@@ -619,19 +619,35 @@ def _resolve_stack_handlers(registry: dict, stack: str | None) -> list:
 _NEXTJS_STANDALONE_COPY = re.compile(
     r"COPY\s+--from=\S+\s+\S+/\.next/standalone\s+", re.IGNORECASE
 )
+# node server.js CMD (standalone 방식) — 경로 포함
+_NEXTJS_SERVER_JS_CMD = re.compile(
+    r'CMD\s*\["node",\s*"[^"]*server\.js"\]', re.IGNORECASE
+)
 
 
 def _fix_nextjs_standalone_without_config(
     dockerfile: str, store: dict[str, str]
 ) -> str:
-    """standalone COPY가 있지만 next.config에 output: 'standalone'이 없으면 교정.
+    """standalone 방식 패턴이 있지만 next.config에 output: 'standalone'이 없으면 교정.
 
-    next build는 output: 'standalone' 설정 없이는 .next/standalone을 생성하지 않으므로
-    COPY --from=builder /app/.next/standalone이 빌드 실패를 유발한다.
-    → COPY --from=builder /app ./ + CMD ["node_modules/.bin/next", "start"] 으로 교정.
+    두 가지 LLM 오류 패턴을 모두 처리:
+
+    Pattern A — standalone COPY:
+      COPY --from=builder /app/.next/standalone ./
+      COPY --from=builder /app/.next/static ./.next/static
+      CMD ["node", "server.js"]
+      → COPY --from=builder /app ./ + CMD ["node_modules/.bin/next", "start"]
+
+    Pattern B — 잘못된 .next destination + server.js CMD:
+      COPY --from=builder /app/.next ./public/.next   ← 잘못된 dest
+      CMD ["node", "public/.next/standalone/server.js"]
+      → COPY dest를 ./.next로 교정 + 필요 COPY 추가 + CMD 교정
     """
     from pathlib import Path as _Path
-    if not _NEXTJS_STANDALONE_COPY.search(dockerfile):
+
+    has_standalone_copy = bool(_NEXTJS_STANDALONE_COPY.search(dockerfile))
+    has_server_js_cmd = bool(_NEXTJS_SERVER_JS_CMD.search(dockerfile))
+    if not (has_standalone_copy or has_server_js_cmd):
         return dockerfile
 
     config_names = ("next.config.ts", "next.config.js", "next.config.mjs", "next.config.cjs")
@@ -640,33 +656,70 @@ def _fix_nextjs_standalone_without_config(
         return dockerfile
 
     logger.warning(
-        "[StackFixer] next.config에 output: 'standalone' 없는데 standalone COPY 감지 — "
+        "[StackFixer] next.config에 output: 'standalone' 없는데 standalone 패턴 감지 — "
         "일반 .next 방식으로 교정"
     )
 
     lines = dockerfile.split("\n")
     result: list[str] = []
-    standalone_copied = False
+    app_copied = False          # /app 전체 COPY 여부
+    node_modules_copied = False # node_modules COPY 여부
+    pkg_json_copied = False     # package.json COPY 여부
+    dotNext_correct = False     # .next → ./.next 정상 COPY 여부
 
     for line in lines:
         stripped = line.strip()
         indent = line[: len(line) - len(line.lstrip())]
 
-        # COPY --from=... /path/.next/standalone ./ → COPY --from=... /app ./
-        m = re.match(r"(COPY\s+--from=\S+)\s+\S+/\.next/standalone\s+(\./?)", stripped, re.IGNORECASE)
+        # Pattern A: COPY --from=... /path/.next/standalone ./ → COPY --from=... /app ./
+        m = re.match(r"(COPY\s+--from=\S+)\s+\S+/\.next/standalone\s+(\./?)\s*$", stripped, re.IGNORECASE)
         if m:
-            result.append(f"{indent}{m.group(1)} /app {m.group(2)}")
-            standalone_copied = True
-            logger.info("[StackFixer] standalone COPY → COPY --from=... /app ./")
+            result.append(f"{indent}{m.group(1)} /app ./")
+            app_copied = True
+            node_modules_copied = True
+            pkg_json_copied = True
+            dotNext_correct = True
+            logger.info("[StackFixer] Pattern A: .next/standalone COPY → /app ./")
             continue
 
-        # COPY --from=... /path/.next/static ./.next/static → 제거 (/app에 이미 포함됨)
-        if re.match(r"COPY\s+--from=\S+\s+\S+/\.next/static\b", stripped, re.IGNORECASE) and standalone_copied:
+        # Pattern A: COPY --from=... /path/.next/static ... → 제거 (/app에 이미 포함)
+        if re.match(r"COPY\s+--from=\S+\s+\S+/\.next/static\b", stripped, re.IGNORECASE) and app_copied:
             logger.info("[StackFixer] removed redundant .next/static COPY")
             continue
 
-        # CMD ["node", "server.js"] → CMD ["node_modules/.bin/next", "start"]
-        if re.match(r'CMD\s*\["node",\s*"server\.js"\]', stripped, re.IGNORECASE):
+        # Pattern B: COPY --from=... /app/.next <wrong-dest> → COPY --from=... /app/.next ./.next
+        m2 = re.match(r"(COPY\s+--from=\S+)\s+(\S+/\.next)\s+(\S+)\s*$", stripped, re.IGNORECASE)
+        if m2:
+            dest = m2.group(3)
+            if dest not in ("./.next", ".next"):
+                result.append(f"{indent}{m2.group(1)} {m2.group(2)} ./.next")
+                dotNext_correct = True
+                logger.info("[StackFixer] Pattern B: .next dest '%s' → ./.next", dest)
+                continue
+            else:
+                dotNext_correct = True
+
+        # node_modules COPY 여부 추적
+        if re.match(r"COPY\s+--from=\S+\s+\S+/node_modules\b", stripped, re.IGNORECASE):
+            node_modules_copied = True
+        # package.json COPY 여부 추적
+        if re.match(r"COPY\s+--from=\S+\s+\S+/package\.json\b", stripped, re.IGNORECASE):
+            pkg_json_copied = True
+        # /app 전체 COPY 여부 추적
+        if re.match(r"COPY\s+--from=\S+\s+\S+/app\s+\./", stripped, re.IGNORECASE):
+            app_copied = True
+            node_modules_copied = True
+            pkg_json_copied = True
+
+        # CMD ["node", "...server.js"] → 필요 COPY 주입 후 CMD 교정
+        if _NEXTJS_SERVER_JS_CMD.match(stripped):
+            if not app_copied:
+                if not node_modules_copied:
+                    result.append(f"{indent}COPY --from=builder /app/node_modules ./node_modules")
+                    logger.info("[StackFixer] injected COPY node_modules")
+                if not pkg_json_copied:
+                    result.append(f"{indent}COPY --from=builder /app/package.json .")
+                    logger.info("[StackFixer] injected COPY package.json")
             result.append(f'{indent}CMD ["node_modules/.bin/next", "start"]')
             logger.info("[StackFixer] CMD node server.js → next start")
             continue

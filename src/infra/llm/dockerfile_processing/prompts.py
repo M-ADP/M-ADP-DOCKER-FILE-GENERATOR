@@ -230,6 +230,7 @@ CMD ["java", "-jar", "/app.jar"]
   ```
 - next.config 파일이 없거나 standalone 설정이 없으면 반드시 **일반 패턴**을 사용하세요.
 - `COPY --from=builder /app ./` + `CMD ["node", ".next/standalone/server.js"]` 조합 절대 금지 — standalone 파일이 생성되지 않아 런타임 크래시 발생.
+- `COPY --from=builder /app/.next ./next` 절대 금지 — destination에서 점(`.`)이 빠지면 `next start`가 `.next` 디렉토리를 찾지 못해 런타임 크래시 발생. 반드시 `./.next`로 작성.
 
 ### Node/Next.js 빌드 순서
 - `npm run build`, `yarn build`, `pnpm build`, `next build`는 애플리케이션 소스 COPY 이후에 실행해야 합니다.

@@ -576,6 +576,33 @@ def _fix_java_jar_cmd_glob(dockerfile: str) -> str:
     )
 
 
+_NEXTJS_WRONG_NEXT_DEST = re.compile(
+    r"(COPY\s+--from=\S+\s+\S+/\.next)\s+(\S+)\s*$", re.IGNORECASE
+)
+
+
+def _fix_nextjs_wrong_next_dest(dockerfile: str) -> str:
+    """COPY --from=... /app/.next <wrong-dest> → ./.next 교정.
+
+    next start는 .next 디렉토리를 찾으므로 destination이 반드시 ./.next여야 한다.
+    예: ./next, ./public/.next, .next/ 등 잘못된 dest를 ./.next로 교정.
+    """
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        indent = line[: len(line) - len(line.lstrip())]
+        m = _NEXTJS_WRONG_NEXT_DEST.match(stripped)
+        if m:
+            dest = m.group(2)
+            if dest not in ("./.next", ".next"):
+                result.append(f"{indent}{m.group(1)} ./.next")
+                logger.info("[StackFixer] .next dest '%s' → ./.next", dest)
+                continue
+        result.append(line)
+    return "\n".join(result)
+
+
 # 특정 스택에만 추가 적용
 _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "node-static":  [_fix_node_static_runner],
@@ -583,6 +610,7 @@ _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "astro":        [_fix_node_static_runner],
     "vue":          [_fix_node_static_runner],
     "svelte":       [_fix_node_static_runner],
+    "nextjs":       [_fix_nextjs_wrong_next_dest],
     "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradle_builder_image, _fix_gradle_copy_full_source, _fix_java_jar_cmd_glob],
     "java-maven":   [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],
     "java":         [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],  # prefix fallback

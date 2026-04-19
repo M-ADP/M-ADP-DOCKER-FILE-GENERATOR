@@ -398,8 +398,9 @@ _php_validator = _validate_dep_copy_before_install(
     r"composer\s+install", ("composer.json",), "PHP"
 )
 _gradle_validator = _validate_dep_copy_before_install(
-    # ./gradlew 또는 gradle + 임의 태스크(bootJar, bootWar, assemble, build, jar 등) 포함
-    r"\.?/?gradlew?\b|gradle\s+\S*(?:build|bootJar|bootWar|assemble|jar|package)\b",
+    # gradle/gradlew + 빌드 태스크 (bootJar, bootWar, assemble, build 등)
+    # 광범위한 gradle 단어 매칭 방지 — 반드시 빌드 태스크까지 포함
+    r"(?:\.?/?gradlew|gradle)\s+(?:\S+\s+)*(?:build|bootJar|bootWar|assemble|jar|package|check)\b",
     ("build.gradle", "settings.gradle"),
     "Java Gradle",
 )
@@ -429,6 +430,59 @@ def _fix_gradle_builder_image(dockerfile: str) -> str:
     return dockerfile
 
 
+_GRADLE_BUILD_PATTERN = re.compile(
+    r"(?:\.?/?gradlew|gradle)\s+(?:\S+\s+)*(?:build|bootJar|bootWar|assemble|jar|package|check)\b"
+)
+
+
+def _fix_gradle_copy_full_source(dockerfile: str) -> str:
+    """Java-Gradle builder 스테이지에서 전체 소스 COPY를 보장.
+
+    LLM이 build.gradle, gradlew, settings.gradle만 COPY하고 src/를 빠뜨리는 패턴 교정.
+    gradle 빌드 명령 전에 COPY . . 또는 src/ COPY가 없으면 'COPY . .'를 삽입한다.
+    """
+    lines = dockerfile.split("\n")
+    stage_starts = [i for i, l in enumerate(lines) if l.strip().startswith("FROM ")]
+    if not stage_starts:
+        return dockerfile
+    stage_starts.append(len(lines))
+
+    result: list[str] = []
+    for start, end in zip(stage_starts, stage_starts[1:]):
+        stage = lines[start:end]
+        stage_text = "\n".join(stage)
+
+        if "as builder" not in stage[0].strip().lower():
+            result.extend(stage)
+            continue
+
+        if not _GRADLE_BUILD_PATTERN.search(stage_text):
+            result.extend(stage)
+            continue
+
+        # 전체 소스 COPY 여부 확인 — "COPY . ." 또는 "COPY src/" 형태
+        has_full_copy = bool(re.search(
+            r"COPY\s+(?:--\S+\s+)*(?:\.\s+\.|src[/\s]|\.\/src)",
+            stage_text,
+        ))
+        if has_full_copy:
+            result.extend(stage)
+            continue
+
+        # gradle 빌드 RUN 라인 바로 앞에 COPY . . 삽입
+        new_stage: list[str] = []
+        inserted = False
+        for line in stage:
+            if not inserted and _GRADLE_BUILD_PATTERN.search(line.strip()):
+                new_stage.append("COPY . .")
+                inserted = True
+                logger.info("[StackFixer] gradle: inserted 'COPY . .' before build command")
+            new_stage.append(line)
+        result.extend(new_stage)
+
+    return "\n".join(result)
+
+
 def _fix_java_jar_cmd_glob(dockerfile: str) -> str:
     """CMD/ENTRYPOINT의 JAR glob 패턴을 shell form으로 교체.
 
@@ -454,7 +508,7 @@ _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "astro":        [_fix_node_static_runner],
     "vue":          [_fix_node_static_runner],
     "svelte":       [_fix_node_static_runner],
-    "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradle_builder_image, _fix_java_jar_cmd_glob],
+    "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradle_builder_image, _fix_gradle_copy_full_source, _fix_java_jar_cmd_glob],
     "java-maven":   [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],
     "java":         [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],  # prefix fallback
 }

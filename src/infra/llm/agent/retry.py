@@ -159,6 +159,21 @@ class RetryLoop:
                 "위 규칙을 준수하여 Dockerfile을 다시 생성하세요."
             )
 
+        if "mainclass" in error.lower() or ("bootjar" in error.lower() and "main class" in error.lower()):
+            return (
+                f"이전 Dockerfile 빌드 실패 — Gradle main class 탐지 실패:\n{error}\n\n"
+                "힌트: src/ 디렉토리가 COPY되지 않아 Gradle이 main class를 찾지 못합니다.\n"
+                "올바른 Java/Spring 패턴:\n"
+                "  FROM gradle:8-jdk17 AS builder\n"
+                "  WORKDIR /app\n"
+                "  COPY . .\n"
+                "  RUN gradle clean bootJar --no-daemon -x test\n"
+                "  FROM eclipse-temurin:17-jre-alpine\n"
+                "  COPY --from=builder /app/build/libs/*.jar /app/app.jar\n"
+                "  CMD [\"java\", \"-jar\", \"/app/app.jar\"]\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
         if ("exit code: 126" in error or "exit code 126" in error) and "gradlew" in error.lower():
             return (
                 f"이전 Dockerfile 빌드 중 gradlew 실행 권한 오류 (exit code 126):\n{error}\n\n"

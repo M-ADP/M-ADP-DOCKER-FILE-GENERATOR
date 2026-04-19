@@ -25,7 +25,10 @@ _ERROR_KEYWORDS = (
 )
 # 빌드 중 발생하는 런타임 노이즈 — Dockerfile 구조 오류가 아니므로 제외
 _ERROR_KEYWORDS_EXCLUDE = (
-    "permission denied",  # npm/pnpm 캐시 디렉토리 접근 실패 등 노이즈 — Dockerfile 구조 오류 아님
+    "permission denied",      # npm/pnpm 캐시 디렉토리 접근 실패 등 노이즈
+    "unexpected end of json", # 빈 placeholder package.json 파싱 실패 — context 한계
+    "json parse error",       # 동일 원인
+    "is not valid json",      # 동일 원인
 )
 
 
@@ -51,6 +54,7 @@ class DockerBuildValidator:
         with TemporaryDirectory() as tmpdir:
             self._write_store(tmpdir, store)
             self._write_dockerfile(tmpdir, dockerfile)
+            self._write_copy_placeholders(tmpdir, dockerfile)
             return await self._run_build(tmpdir)
 
     @staticmethod
@@ -79,6 +83,38 @@ class DockerBuildValidator:
     @staticmethod
     def _write_dockerfile(tmpdir: str, dockerfile: str) -> None:
         (Path(tmpdir) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+    @staticmethod
+    def _write_copy_placeholders(tmpdir: str, dockerfile: str) -> None:
+        """Dockerfile COPY 소스 중 컨텍스트에 없는 파일을 빈 placeholder로 생성.
+
+        store에 없는 .yarnrc, .npmrc 등 config 파일 때문에 COPY가 실패해
+        구조적으로 올바른 Dockerfile이 오탐지되는 것을 방지한다.
+        """
+        tmp = Path(tmpdir)
+        for line in dockerfile.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("COPY ") or "--from=" in stripped:
+                continue
+            parts = stripped.split()
+            # COPY [--opt] src... dest — 마지막이 dest, 나머지가 src
+            srcs = [p for p in parts[1:-1] if not p.startswith("--")]
+            for src in srcs:
+                if "*" in src or "?" in src:
+                    continue
+                target = tmp / src
+                if target.exists():
+                    continue
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if src.endswith("/") or "." not in target.name:
+                        target.mkdir(exist_ok=True)
+                        logger.debug("[BuildValidator] placeholder dir: %s", src)
+                    else:
+                        target.write_text("", encoding="utf-8")
+                        logger.debug("[BuildValidator] placeholder file: %s", src)
+                except OSError as e:
+                    logger.debug("[BuildValidator] placeholder 생성 실패: %s — %s", src, e)
 
     @staticmethod
     def _build_target(dockerfile_content: str) -> str | None:

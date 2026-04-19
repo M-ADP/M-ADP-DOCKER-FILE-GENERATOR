@@ -81,6 +81,23 @@ def _move_user_to_end_of_stage(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+def _fix_yarn_frozen_lockfile(dockerfile: str) -> str:
+    """yarn install --frozen-lockfile → yarn install --immutable 교정.
+
+    Yarn Berry(.yarnrc.yml 기반)는 --frozen-lockfile 플래그를 지원하지 않으며
+    --immutable을 사용해야 한다. Classic yarn(v1)은 --frozen-lockfile이 맞지만,
+    LLM이 Berry 프로젝트에 잘못 적용하는 경우를 교정한다.
+    """
+    # .yarnrc.yml이 참조되는 Dockerfile에서만 교정
+    if ".yarnrc.yml" not in dockerfile and "corepack" not in dockerfile.lower():
+        return dockerfile
+    return re.sub(
+        r"yarn\s+install\s+--frozen-lockfile",
+        "yarn install --immutable",
+        dockerfile,
+    )
+
+
 def _fix_invalid_corepack(dockerfile: str) -> str:
     """corepack prepare 뒤에 --activate 외의 잘못된 플래그를 제거한다.
 
@@ -381,6 +398,7 @@ _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
     _fix_serve_not_installed,    # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
     _move_user_to_end_of_stage,  # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
     _fix_alpine_adduser_home,    # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
+    _fix_yarn_frozen_lockfile,   # Yarn Berry에서 --frozen-lockfile → --immutable 교정
     _fix_invalid_corepack,       # corepack prepare --destination 존재하지 않는 플래그 교정
     _fix_nginx_cmd,              # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
 ]

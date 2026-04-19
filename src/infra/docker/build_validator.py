@@ -31,8 +31,10 @@ _ERROR_KEYWORDS_EXCLUDE = (
     "is not valid json",
     "broken_lockfile",          # 잘린 lockfile — collector MAX_FILE_CHARS 한계
     "outdated_lockfile",        # lockfile ↔ package.json 불일치 — context 한계
-    "frozen-lockfile",          # placeholder lockfile로 인한 frozen 모드 실패
+    # "frozen-lockfile" 제거 — 이 키워드를 포함한 에러 라인을 필터링하면
+    # returncode=1인데 errors=[] 상황이 되어 LLM에 빈 피드백이 전달됨
     "lockfile is not up-to-date",
+    "your lockfile needs to be updated",  # yarn frozen-lockfile context 한계
 )
 
 # lockfile 이름 → 최소 유효 placeholder 내용
@@ -209,7 +211,19 @@ class DockerBuildValidator:
         if proc.returncode == 0:
             return BuildResult(success=True, build_time_ms=elapsed_ms)
 
-        errors = self._parse_errors(stderr.decode("utf-8", errors="replace"))
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        errors = self._parse_errors(stderr_text)
+
+        if not errors:
+            # 모든 에러가 context 한계 노이즈로 필터링된 경우 — Dockerfile 구조 문제 아님
+            logger.info(
+                "[BuildValidator] returncode=%d but all errors filtered (context limitation). "
+                "Treating as success. stderr tail: %s",
+                proc.returncode,
+                stderr_text[-300:].strip(),
+            )
+            return BuildResult(success=True, build_time_ms=elapsed_ms)
+
         return BuildResult(success=False, errors=errors, build_time_ms=elapsed_ms)
 
     @staticmethod

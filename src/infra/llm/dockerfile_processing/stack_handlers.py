@@ -398,29 +398,51 @@ _php_validator = _validate_dep_copy_before_install(
     r"composer\s+install", ("composer.json",), "PHP"
 )
 _gradle_validator = _validate_dep_copy_before_install(
-    r"gradlew?\s+\S*build|gradle\s+\S*build", ("build.gradle", "settings.gradle"), "Java Gradle"
+    # ./gradlew 또는 gradle + 임의 태스크(bootJar, bootWar, assemble, build, jar 등) 포함
+    r"\.?/?gradlew?\b|gradle\s+\S*(?:build|bootJar|bootWar|assemble|jar|package)\b",
+    ("build.gradle", "settings.gradle"),
+    "Java Gradle",
 )
 _maven_validator = _validate_dep_copy_before_install(
     r"mvn\s+\S*(package|install|compile)", ("pom.xml",), "Java Maven"
 )
 
-def _fix_gradlew_permissions(dockerfile: str) -> str:
-    """./gradlew 실행 전 chmod +x 삽입 — tar 복사된 gradlew는 실행 권한 없음(exit code 126).
+def _fix_gradle_builder_image(dockerfile: str) -> str:
+    """builder 스테이지의 FROM을 gradle 공식 이미지로 교체하고 ./gradlew → gradle 변환.
 
-    RUN ./gradlew ... → RUN chmod +x ./gradlew && ./gradlew ...
+    gradle-wrapper.jar는 git에 커밋되지 않아 빌드 컨텍스트에 없는 경우가 많다.
+    gradle:8-jdk17 이미지에는 gradle CLI가 내장되어 있어 wrapper 불필요.
     """
-    def _add_chmod(m: re.Match) -> str:
-        run_prefix = m.group(1)  # "RUN " 또는 "RUN\t"
-        rest = m.group(2)        # gradlew 이후 전체
-        # 이미 chmod가 있으면 건너뜀
-        full = m.group(0)
-        if "chmod" in full:
-            return full
-        return f"{run_prefix}chmod +x ./gradlew && {rest}"
+    # builder 스테이지 FROM 교체 (eclipse-temurin/openjdk/amazoncorretto JDK → gradle 이미지)
+    dockerfile = re.sub(
+        r"FROM\s+(?:eclipse-temurin|openjdk|amazoncorretto):\S*jdk\S*\s+(AS\s+builder\b)",
+        r"FROM gradle:8-jdk17 \1",
+        dockerfile,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    # ./gradlew → gradle (wrapper jar 불필요)
+    dockerfile = re.sub(r"\./gradlew\b", "gradle", dockerfile)
+    # 남은 단독 gradlew (경로 없이) → gradle
+    dockerfile = re.sub(r"(?<![./\w])gradlew\b", "gradle", dockerfile)
+    logger.info("[StackFixer] gradle: replaced ./gradlew → gradle, builder image → gradle:8-jdk17")
+    return dockerfile
+
+
+def _fix_java_jar_cmd_glob(dockerfile: str) -> str:
+    """CMD/ENTRYPOINT의 JAR glob 패턴을 shell form으로 교체.
+
+    exec form에서 glob은 셸이 확장하지 않아 실제 파일을 찾지 못함.
+    CMD ["java", "-jar", "build/libs/*.jar"] → CMD ["sh","-c","java -jar build/libs/*.jar"]
+    """
+    def _replace_glob_cmd(m: re.Match) -> str:
+        instruction = m.group(1)  # CMD or ENTRYPOINT
+        jar_path = m.group(2)     # e.g. build/libs/*.jar
+        return f'{instruction} ["sh", "-c", "java -jar {jar_path}"]'
 
     return re.sub(
-        r"(RUN\s+)((?:[^\n]*&&\s*)?\.?/?gradlew\b[^\n]*)",
-        _add_chmod,
+        r'(CMD|ENTRYPOINT)\s*\[.*?"java".*?"-jar".*?"([^"]*\*[^"]*\.jar)".*?\]',
+        _replace_glob_cmd,
         dockerfile,
     )
 
@@ -432,9 +454,9 @@ _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "astro":        [_fix_node_static_runner],
     "vue":          [_fix_node_static_runner],
     "svelte":       [_fix_node_static_runner],
-    "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradlew_permissions],
-    "java-maven":   [_fix_java_jdk_to_jre],
-    "java":         [_fix_java_jdk_to_jre],  # prefix fallback
+    "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradle_builder_image, _fix_java_jar_cmd_glob],
+    "java-maven":   [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],
+    "java":         [_fix_java_jdk_to_jre, _fix_java_jar_cmd_glob],  # prefix fallback
 }
 
 _STACK_VALIDATORS: dict[str, list[Callable[[str], list[str]]]] = {

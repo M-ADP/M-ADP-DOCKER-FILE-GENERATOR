@@ -81,6 +81,46 @@ def _move_user_to_end_of_stage(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+_NODE_INSTALL_PATTERN = re.compile(
+    r"RUN\s+.*\b(?:pnpm|npm|yarn)\s+install\b", re.IGNORECASE
+)
+_COPY_SOURCE_PATTERN = re.compile(
+    r"COPY\s+(?:--\S+\s+)*(?!\s*--from)(?:\.|package\.json|requirements\.txt|Pipfile)",
+    re.IGNORECASE,
+)
+
+
+def _fix_node_install_before_copy(dockerfile: str) -> str:
+    """npm/pnpm/yarn install이 COPY 전에 오는 경우 'COPY . .' 삽입.
+
+    LLM이 패키지 install을 소스 복사 전에 실행하는 잘못된 순서 교정.
+    ERR_PNPM_NO_PKG_MANIFEST / npm ERR! Cannot read properties of null 방지.
+    """
+    lines = dockerfile.split("\n")
+    stage_starts = [i for i, l in enumerate(lines) if l.strip().startswith("FROM ")]
+    if not stage_starts:
+        return dockerfile
+    stage_starts.append(len(lines))
+
+    result: list[str] = []
+    for start, end in zip(stage_starts, stage_starts[1:]):
+        stage = lines[start:end]
+        copy_seen = False
+        new_stage: list[str] = []
+        for line in stage:
+            stripped = line.strip()
+            if _COPY_SOURCE_PATTERN.match(stripped):
+                copy_seen = True
+            if _NODE_INSTALL_PATTERN.search(stripped) and not copy_seen:
+                new_stage.append("COPY . .")
+                copy_seen = True
+                logger.info("[StackFixer] inserted 'COPY . .' before package install")
+            new_stage.append(line)
+        result.extend(new_stage)
+
+    return "\n".join(result)
+
+
 def _fix_yarn_frozen_lockfile(dockerfile: str) -> str:
     """yarn install --frozen-lockfile → yarn install --immutable 교정.
 
@@ -404,12 +444,13 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
-    _fix_serve_not_installed,    # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
-    _move_user_to_end_of_stage,  # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
-    _fix_alpine_adduser_home,    # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
-    _fix_yarn_frozen_lockfile,   # Yarn Berry에서 --frozen-lockfile → --immutable 교정
-    _fix_invalid_corepack,       # corepack prepare --destination 존재하지 않는 플래그 교정
-    _fix_nginx_cmd,              # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
+    _fix_serve_not_installed,        # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
+    _fix_node_install_before_copy,   # npm/pnpm/yarn install 전에 COPY 없으면 'COPY . .' 삽입
+    _move_user_to_end_of_stage,      # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
+    _fix_alpine_adduser_home,        # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
+    _fix_yarn_frozen_lockfile,       # Yarn Berry에서 --frozen-lockfile → --immutable 교정
+    _fix_invalid_corepack,           # corepack prepare --destination 존재하지 않는 플래그 교정
+    _fix_nginx_cmd,                  # nginx -c /missing.conf 패턴은 어느 스택에서도 잘못된 것
 ]
 
 _UNIVERSAL_VALIDATORS: list[Callable[[str], list[str]]] = [

@@ -69,6 +69,18 @@ class DockerBuildValidator:
         if not await self._is_buildctl_available():
             logger.info("[BuildValidator] buildctl 접근 불가, 빌드 검증 건너뜁니다.")
             return BuildResult(success=True)
+
+        truncated = self._truncated_lockfiles(store)
+        if truncated:
+            # 잘린 lockfile이 있으면 yarn/pnpm install이 placeholder로 실제 실행되어
+            # 70초+ 낭비 후 실패하므로 BuildKit 검증 전체를 건너뜀.
+            # 정적 검증(hadolint, stack validators)은 이미 별도로 실행됨.
+            logger.info(
+                "[BuildValidator] truncated lockfile 감지 (%s) — BuildKit 검증 건너뜁니다.",
+                ", ".join(truncated),
+            )
+            return BuildResult(success=True)
+
         with TemporaryDirectory() as tmpdir:
             self._write_store(tmpdir, store)
             self._write_dockerfile(tmpdir, dockerfile)
@@ -102,6 +114,15 @@ class DockerBuildValidator:
     @staticmethod
     def _write_dockerfile(tmpdir: str, dockerfile: str) -> None:
         (Path(tmpdir) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+    @staticmethod
+    def _truncated_lockfiles(store: dict[str, str]) -> list[str]:
+        """store에서 collector가 잘라낸 lockfile 목록 반환."""
+        truncated = []
+        for path, content in store.items():
+            if Path(path).name in _LOCKFILE_PLACEHOLDERS and "(truncated)" in content:
+                truncated.append(Path(path).name)
+        return truncated
 
     @staticmethod
     def _sanitize_lockfiles(tmpdir: str) -> None:

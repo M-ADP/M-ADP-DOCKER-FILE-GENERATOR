@@ -99,16 +99,25 @@ def _fix_yarn_frozen_lockfile(dockerfile: str) -> str:
 
 
 def _fix_invalid_corepack(dockerfile: str) -> str:
-    """corepack prepare 뒤에 --activate 외의 잘못된 플래그를 제거한다.
+    """잘못된 corepack 호출 패턴 교정.
 
-    유효한 플래그: --activate, --json, --output, -o
-    잘못된 예: --destination, --binary, --global, 기타 미지원 옵션
+    1. corepack prepare --<invalid-flag>  → corepack enable
+    2. corepack enable /path/...          → corepack enable
+       (경로를 packageManager 이름으로 오해하는 LLM 패턴)
     """
-    return re.sub(
+    # corepack prepare --<invalid> 교정
+    dockerfile = re.sub(
         r"corepack\s+prepare\s+\S+\s+--(?!activate\b|json\b|output\b)\S*",
         "corepack enable",
         dockerfile,
     )
+    # corepack enable /absolute/path → corepack enable
+    dockerfile = re.sub(
+        r"corepack\s+enable\s+/\S+",
+        "corepack enable",
+        dockerfile,
+    )
+    return dockerfile
 
 
 def _fix_nginx_cmd(dockerfile: str) -> str:

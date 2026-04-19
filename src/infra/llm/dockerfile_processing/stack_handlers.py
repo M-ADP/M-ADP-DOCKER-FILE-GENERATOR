@@ -137,6 +137,41 @@ def _fix_node_static_runner(dockerfile: str) -> str:
     return dockerfile
 
 
+def _fix_serve_not_installed(dockerfile: str) -> str:
+    """CMD ["serve", ...] 사용 시 npm install -g serve가 없으면 추가.
+
+    LLM이 serve CLI를 CMD에 쓰면서 설치 단계를 빠뜨리는 패턴 교정.
+    """
+    lines = dockerfile.split("\n")
+    stage_starts = [i for i, l in enumerate(lines) if l.strip().startswith("FROM ")]
+    if not stage_starts:
+        return dockerfile
+    stage_starts.append(len(lines))
+
+    result: list[str] = []
+    for start, end in zip(stage_starts, stage_starts[1:]):
+        stage = lines[start:end]
+        stage_text = "\n".join(stage)
+
+        uses_serve_cmd = bool(re.search(r'CMD\s*\[.*"serve"', stage_text))
+        has_serve_install = bool(re.search(r"npm\s+install\s+-g\s+serve|npx\s+serve", stage_text))
+
+        if uses_serve_cmd and not has_serve_install:
+            # CMD 라인 앞에 RUN npm install -g serve 삽입
+            new_stage: list[str] = []
+            for line in stage:
+                stripped = line.strip()
+                if re.match(r'CMD\s*\[.*"serve"', stripped):
+                    new_stage.append("RUN npm install -g serve")
+                    logger.info("[StackFixer] added 'npm install -g serve' before CMD serve")
+                new_stage.append(line)
+            result.extend(new_stage)
+        else:
+            result.extend(stage)
+
+    return "\n".join(result)
+
+
 # ---------------------------------------------------------------------------
 # Validators — (dockerfile: str) -> list[str]
 # ---------------------------------------------------------------------------
@@ -258,7 +293,12 @@ def _validate_dep_copy_before_install(
                 copy_seen = False
                 continue
             if re.match(r"COPY\b", line) and not re.search(r"--from=", line):
-                src = line.split()[1] if len(line.split()) > 1 else ""
+                parts = line.split()
+                # --chown, --chmod 등 옵션 토큰 건너뛰고 실제 src 추출
+                src_idx = 1
+                while src_idx < len(parts) and parts[src_idx].startswith("--"):
+                    src_idx += 1
+                src = parts[src_idx] if src_idx < len(parts) else ""
                 if any(dep in src for dep in dep_files) or src in (".", ""):
                     copy_seen = True
             if re.search(install_pattern, line) and not copy_seen:
@@ -338,6 +378,7 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 
 # 모든 스택에 무조건 적용 (stack 불문)
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
+    _fix_serve_not_installed,    # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
     _move_user_to_end_of_stage,  # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
     _fix_alpine_adduser_home,    # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
     _fix_invalid_corepack,       # corepack prepare --destination 존재하지 않는 플래그 교정
@@ -363,6 +404,27 @@ _maven_validator = _validate_dep_copy_before_install(
     r"mvn\s+\S*(package|install|compile)", ("pom.xml",), "Java Maven"
 )
 
+def _fix_gradlew_permissions(dockerfile: str) -> str:
+    """./gradlew 실행 전 chmod +x 삽입 — tar 복사된 gradlew는 실행 권한 없음(exit code 126).
+
+    RUN ./gradlew ... → RUN chmod +x ./gradlew && ./gradlew ...
+    """
+    def _add_chmod(m: re.Match) -> str:
+        run_prefix = m.group(1)  # "RUN " 또는 "RUN\t"
+        rest = m.group(2)        # gradlew 이후 전체
+        # 이미 chmod가 있으면 건너뜀
+        full = m.group(0)
+        if "chmod" in full:
+            return full
+        return f"{run_prefix}chmod +x ./gradlew && {rest}"
+
+    return re.sub(
+        r"(RUN\s+)((?:[^\n]*&&\s*)?\.?/?gradlew\b[^\n]*)",
+        _add_chmod,
+        dockerfile,
+    )
+
+
 # 특정 스택에만 추가 적용
 _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "node-static":  [_fix_node_static_runner],
@@ -370,7 +432,7 @@ _STACK_FIXERS: dict[str, list[Callable[[str], str]]] = {
     "astro":        [_fix_node_static_runner],
     "vue":          [_fix_node_static_runner],
     "svelte":       [_fix_node_static_runner],
-    "java-gradle":  [_fix_java_jdk_to_jre],
+    "java-gradle":  [_fix_java_jdk_to_jre, _fix_gradlew_permissions],
     "java-maven":   [_fix_java_jdk_to_jre],
     "java":         [_fix_java_jdk_to_jre],  # prefix fallback
 }

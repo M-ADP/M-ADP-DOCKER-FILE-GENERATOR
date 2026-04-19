@@ -159,6 +159,14 @@ class RetryLoop:
                 "위 규칙을 준수하여 Dockerfile을 다시 생성하세요."
             )
 
+        if ("exit code: 126" in error or "exit code 126" in error) and "gradlew" in error.lower():
+            return (
+                f"이전 Dockerfile 빌드 중 gradlew 실행 권한 오류 (exit code 126):\n{error}\n\n"
+                "힌트: tar에서 복사된 gradlew는 실행 권한이 없습니다. 반드시 chmod를 추가하세요:\n"
+                "  RUN chmod +x ./gradlew && ./gradlew clean build --no-daemon\n"
+                "Dockerfile만 다시 생성하세요."
+            )
+
         if "빌드 실패" in error:
             return (
                 f"이전 Dockerfile이 실제 빌드에 실패했습니다:\n{error}\n"

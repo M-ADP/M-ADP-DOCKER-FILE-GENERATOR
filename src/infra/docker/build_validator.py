@@ -25,11 +25,27 @@ _ERROR_KEYWORDS = (
 )
 # 빌드 중 발생하는 런타임 노이즈 — Dockerfile 구조 오류가 아니므로 제외
 _ERROR_KEYWORDS_EXCLUDE = (
-    "permission denied",      # npm/pnpm 캐시 디렉토리 접근 실패 등 노이즈
-    "unexpected end of json", # 빈 placeholder package.json 파싱 실패 — context 한계
-    "json parse error",       # 동일 원인
-    "is not valid json",      # 동일 원인
+    "permission denied",        # npm/pnpm 캐시 디렉토리 접근 실패 등 노이즈
+    "unexpected end of json",   # 빈 placeholder package.json 파싱 실패 — context 한계
+    "json parse error",
+    "is not valid json",
+    "broken_lockfile",          # 잘린 lockfile — collector MAX_FILE_CHARS 한계
+    "outdated_lockfile",        # lockfile ↔ package.json 불일치 — context 한계
+    "frozen-lockfile",          # placeholder lockfile로 인한 frozen 모드 실패
+    "lockfile is not up-to-date",
 )
+
+# lockfile 이름 → 최소 유효 placeholder 내용
+_LOCKFILE_PLACEHOLDERS: dict[str, str] = {
+    "pnpm-lock.yaml":    "lockfileVersion: '9.0'\n",
+    "package-lock.json": '{"name":"","lockfileVersion":3,"packages":{}}\n',
+    "yarn.lock":         "# yarn lockfile v1\n",
+    "Cargo.lock":        "version = 3\n",
+    "poetry.lock":       '[metadata]\nlock-version = "2.0"\npython-versions = "*"\ncontent-hash = ""\n',
+    "composer.lock":     '{"packages":[],"packages-dev":[]}\n',
+    "go.sum":            "",
+    "Gemfile.lock":      "",
+}
 
 
 @dataclass
@@ -55,6 +71,7 @@ class DockerBuildValidator:
             self._write_store(tmpdir, store)
             self._write_dockerfile(tmpdir, dockerfile)
             self._write_copy_placeholders(tmpdir, dockerfile)
+            self._sanitize_lockfiles(tmpdir)
             return await self._run_build(tmpdir)
 
     @staticmethod
@@ -83,6 +100,26 @@ class DockerBuildValidator:
     @staticmethod
     def _write_dockerfile(tmpdir: str, dockerfile: str) -> None:
         (Path(tmpdir) / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+    @staticmethod
+    def _sanitize_lockfiles(tmpdir: str) -> None:
+        """잘린(truncated) lockfile을 최소 유효 placeholder로 교체.
+
+        collector.py의 MAX_FILE_CHARS 제한으로 lockfile이 잘리면 pnpm/yarn/cargo 등이
+        broken lockfile 에러를 내며 Dockerfile 구조와 무관한 빌드 실패가 발생한다.
+        """
+        tmp = Path(tmpdir)
+        for name, placeholder in _LOCKFILE_PLACEHOLDERS.items():
+            lf = tmp / name
+            if not lf.exists():
+                continue
+            try:
+                content = lf.read_text(encoding="utf-8")
+                if "(truncated)" in content:
+                    lf.write_text(placeholder, encoding="utf-8")
+                    logger.info("[BuildValidator] truncated lockfile replaced with placeholder: %s", name)
+            except OSError as e:
+                logger.debug("[BuildValidator] lockfile sanitize 실패: %s — %s", name, e)
 
     @staticmethod
     def _write_copy_placeholders(tmpdir: str, dockerfile: str) -> None:

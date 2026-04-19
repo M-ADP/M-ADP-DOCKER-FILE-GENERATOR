@@ -212,6 +212,25 @@ CMD ["java", "-jar", "/app.jar"]
 - package.json, package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb 등 의존성 설치에 필요한 파일은 실제 존재하는 파일만 COPY하세요.
 - npm/yarn/pnpm/bun lockfile을 한 줄에 모두 나열하지 마세요. 저장소에 있는 package manager의 lockfile만 선택하세요.
 
+### Next.js standalone 감지 (필수)
+- **반드시 `read_file`로 `next.config.ts` (또는 `.js`, `.mjs`)를 읽어 `output: 'standalone'` 여부를 확인하세요.**
+- **output: 'standalone' 있음** → runner stage에서 standalone 패턴 사용:
+  ```
+  COPY --from=builder /app/.next/standalone ./
+  COPY --from=builder /app/.next/static ./.next/static
+  COPY --from=builder /app/public ./public
+  CMD ["node", "server.js"]
+  ```
+- **output: 'standalone' 없음 (기본)** → runner stage에서 일반 패턴 사용:
+  ```
+  COPY --from=builder /app/.next ./.next
+  COPY --from=builder /app/node_modules ./node_modules
+  COPY --from=builder /app/package.json ./package.json
+  CMD ["node_modules/.bin/next", "start"]
+  ```
+- next.config 파일이 없거나 standalone 설정이 없으면 반드시 **일반 패턴**을 사용하세요.
+- `COPY --from=builder /app ./` + `CMD ["node", ".next/standalone/server.js"]` 조합 절대 금지 — standalone 파일이 생성되지 않아 런타임 크래시 발생.
+
 ### Node/Next.js 빌드 순서
 - `npm run build`, `yarn build`, `pnpm build`, `next build`는 애플리케이션 소스 COPY 이후에 실행해야 합니다.
 - `COPY package.json <lockfile> ./`만 한 뒤 build를 실행하면 Next.js가 app/pages/src/app 디렉토리를 찾지 못합니다.

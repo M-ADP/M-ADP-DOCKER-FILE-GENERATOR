@@ -705,8 +705,8 @@ def _fix_nextjs_standalone_without_config(
         # package.json COPY 여부 추적
         if re.match(r"COPY\s+--from=\S+\s+\S+/package\.json\b", stripped, re.IGNORECASE):
             pkg_json_copied = True
-        # /app 전체 COPY 여부 추적
-        if re.match(r"COPY\s+--from=\S+\s+\S+/app\s+\./", stripped, re.IGNORECASE):
+        # /app 전체 COPY 여부 추적 (/app 또는 .../app 경로 모두 인식)
+        if re.match(r"COPY\s+--from=\S+\s+(?:/app|\S+/app)\s+\./", stripped, re.IGNORECASE):
             app_copied = True
             node_modules_copied = True
             pkg_json_copied = True

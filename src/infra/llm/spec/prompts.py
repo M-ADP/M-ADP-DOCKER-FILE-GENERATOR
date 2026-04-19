@@ -55,13 +55,15 @@ SPEC_SYSTEM_PROMPT = """당신은 소스코드를 분석해서 Docker 빌드 스
 | detected_stack | builder | runner | serve 방식 |
 |---|---|---|---|
 | vite-static, node-static, astro | node:22-alpine | node:22-alpine | serve -s dist -l 3000 |
-| nextjs | node:22-alpine | node:22-alpine | node .next/standalone/server.js |
+| nextjs (output:'standalone' 있음) | node:22-alpine | node:22-alpine | node .next/standalone/server.js |
+| nextjs (output:'standalone' 없음) | node:22-alpine | node:22-alpine | node_modules/.bin/next start |
 | nuxt | node:22-alpine | node:22-alpine | node .output/server/index.mjs |
 | python-fastapi, python-flask | python:3.12-slim | python:3.12-slim | uvicorn / gunicorn |
 | java-gradle, java-maven | eclipse-temurin:17-jdk | eclipse-temurin:17-jre | java -jar |
 | go | golang:1.22-alpine | alpine:3.19 | binary |
 | rust | rust:1.75-slim | debian:bookworm-slim | binary |
 
+- **nextjs**: next.config 파일 내용을 확인할 수 없으면 반드시 **output:'standalone' 없음** 패턴을 기본값으로 사용하세요.
 - **node-static / vite-static**: runner는 반드시 `node:22-alpine` + `serve`. nginx 사용 금지.
 - **nginx 절대 금지** (node-static, vite-static, astro, nuxt, nextjs 모두 해당)
 - alpine + apk add nginx 패턴 금지 — nginx가 꼭 필요하면 `nginx:alpine` 이미지 사용

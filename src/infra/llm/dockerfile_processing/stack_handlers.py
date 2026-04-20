@@ -121,6 +121,50 @@ def _fix_node_install_before_copy(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+_PNPM_RUN_PATTERN = re.compile(r"^RUN\b.*\bpnpm\b", re.IGNORECASE)
+_PNPM_SETUP_PATTERN = re.compile(
+    r"corepack\s+enable|npm\s+(?:install|i)\s+(?:-g\s+pnpm\b|pnpm\b.*-g)", re.IGNORECASE
+)
+
+
+def _fix_pnpm_without_corepack(dockerfile: str) -> str:
+    """pnpm 사용 RUN에 corepack enable이 없으면 앞에 삽입.
+
+    node:22-alpine에는 pnpm이 기본 설치되지 않으므로 corepack enable 또는
+    npm install -g pnpm 없이 pnpm을 실행하면 /bin/sh: pnpm: not found (exit code 127).
+    """
+    if "pnpm" not in dockerfile.lower():
+        return dockerfile
+
+    lines = dockerfile.split("\n")
+    stage_starts = [i for i, ln in enumerate(lines) if ln.strip().startswith("FROM ")]
+    if not stage_starts:
+        return dockerfile
+    stage_starts.append(len(lines))
+
+    result: list[str] = []
+    for start, end in zip(stage_starts, stage_starts[1:]):
+        stage = lines[start:end]
+        pnpm_setup_seen = False
+        new_stage: list[str] = []
+        for line in stage:
+            stripped = line.strip()
+            indent = line[: len(line) - len(line.lstrip())]
+            if stripped.startswith("RUN"):
+                if _PNPM_SETUP_PATTERN.search(stripped):
+                    pnpm_setup_seen = True
+                elif _PNPM_RUN_PATTERN.match(stripped) and not pnpm_setup_seen:
+                    fixed = re.sub(r"^(RUN\s+)", r"\1corepack enable && ", stripped)
+                    new_stage.append(indent + fixed)
+                    pnpm_setup_seen = True
+                    logger.info("[StackFixer] prepended 'corepack enable &&' to pnpm RUN")
+                    continue
+            new_stage.append(line)
+        result.extend(new_stage)
+
+    return "\n".join(result)
+
+
 def _fix_yarn_frozen_lockfile(dockerfile: str) -> str:
     """yarn install --frozen-lockfile → yarn install --immutable 교정.
 
@@ -453,6 +497,7 @@ def _validate_node_static_uses_serve(dockerfile: str) -> list[str]:
 _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
     _fix_serve_not_installed,        # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
     _fix_node_install_before_copy,   # npm/pnpm/yarn install 전에 COPY 없으면 'COPY . .' 삽입
+    _fix_pnpm_without_corepack,      # pnpm 사용하는데 corepack enable 없으면 삽입 (exit code 127 방지)
     _move_user_to_end_of_stage,      # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
     _fix_alpine_adduser_home,        # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
     _fix_yarn_frozen_lockfile,       # Yarn Berry에서 --frozen-lockfile → --immutable 교정

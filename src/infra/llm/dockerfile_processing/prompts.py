@@ -290,6 +290,7 @@ CMD ["java", "-jar", "/app.jar"]
 - **.yarnrc.yml 있을 때 `npm install -g yarn` 사용 금지** → `corepack enable` 사용
 - **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용
 - **`corepack prepare --destination` 사용 금지** — 존재하지 않는 플래그. pnpm은 `corepack enable && pnpm install --frozen-lockfile` 또는 `npm install -g pnpm && pnpm install --frozen-lockfile` 사용
+- **corepack enable 없이 `pnpm install` 직접 실행 금지** — node:22-alpine에 pnpm 미설치, exit code 127 발생. 반드시 같은 RUN에 `corepack enable &&` 또는 `npm install -g pnpm &&` 선행
 - **node-static/vite-static에서 nginx 사용 금지** → 반드시 `node:22-alpine` + `serve` 사용
 - **alpine + apk add nginx 패턴 금지** → nginx가 필요하면 `nginx:alpine` 이미지 사용
 - **nginx CMD에 `-c /path/nginx.conf` 사용 금지** → nginx.conf 파일이 이미지에 없으면 런타임 에러

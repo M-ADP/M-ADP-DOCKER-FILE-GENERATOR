@@ -22,9 +22,10 @@ _BASE_IMAGES: dict[str, str] = {
     "python-flask":  "python:3.12-slim",
     "python":        "python:3.12-slim",
     "java-gradle":   "gradle:8-jdk17",
-    "java-maven":    "eclipse-temurin:17-jdk",
+    "java-maven":    "maven:3.9-eclipse-temurin-17",
     "go":            "golang:1.22-alpine",
     "rust":          "rust:1.75-slim",
+    "ruby":          "ruby:3.2-slim",
 }
 
 _RUNNER_IMAGES: dict[str, str] = {
@@ -42,6 +43,8 @@ _RUNNER_IMAGES: dict[str, str] = {
     "java-gradle":   "eclipse-temurin:17-jre",
     "java-maven":    "eclipse-temurin:17-jre",
     "go":            "alpine:3.19",
+    "rust":          "debian:bookworm-slim",
+    "ruby":          "ruby:3.2-slim",
 }
 
 _DEFAULT_PORTS: dict[str, int] = {
@@ -60,6 +63,7 @@ _DEFAULT_PORTS: dict[str, int] = {
     "java-maven":    8080,
     "go":            8080,
     "rust":          8080,
+    "ruby":          3000,
 }
 
 _BUILD_OUTPUTS: dict[str, str] = {
@@ -145,9 +149,15 @@ class RuleEngine:
         if pkg == "go":
             return RuleResult("go mod download", "certain", "file:go.mod")
         if pkg == "cargo":
-            return RuleResult("cargo build --release", "certain", "file:Cargo.toml")
+            return RuleResult(
+                "cargo build --release && find target/release -maxdepth 1 -type f -executable -exec cp {} /app/server \\;",
+                "certain", "file:Cargo.toml",
+            )
         if pkg == "bundler":
-            return RuleResult("bundle install", "certain", "file:Gemfile")
+            return RuleResult(
+                "bundle config set --local without 'development test' && bundle install --jobs 4 --retry 3",
+                "certain", "file:Gemfile",
+            )
         if pkg == "composer":
             return RuleResult("composer install --no-dev", "certain", "file:composer.json")
 
@@ -207,6 +217,13 @@ class RuleEngine:
 
         if fw == "go":
             return RuleResult(["/app/server"], "certain", "rule:go")
+
+        if fw == "rust":
+            return RuleResult(["/app/server"], "certain", "rule:rust")
+
+        if fw == "ruby":
+            ep = d.entry_point or "app.rb"
+            return RuleResult(["bundle", "exec", "ruby", ep], "inferred", f"rule:ruby+entry:{ep}")
 
         if fw in ("java-gradle", "java-maven"):
             return RuleResult(["java", "-jar", "/app.jar"], "certain", "rule:java")

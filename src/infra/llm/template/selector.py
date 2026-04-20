@@ -13,6 +13,8 @@ from src.infra.llm.template.base import (
     render_node_server,
     render_nuxt,
     render_python,
+    render_ruby,
+    render_rust,
     render_static,
 )
 
@@ -37,6 +39,10 @@ def select(params: BuildParams) -> RenderFn | None:
         return render_python
     if fw == "go":
         return render_go
+    if fw == "rust":
+        return render_rust
+    if fw == "ruby":
+        return render_ruby
     if fw in _JAVA_FRAMEWORKS:
         return render_java
     if fw == "node-server":

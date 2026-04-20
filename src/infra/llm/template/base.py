@@ -298,6 +298,79 @@ def render_go(params: BuildParams) -> str:
     return builder + "\n\n" + _lines(*runner_lines)
 
 
+# ── Rust 템플릿 ───────────────────────────────────────────────────────────────
+
+def render_rust(params: BuildParams) -> str:
+    d      = params.detected
+    root   = d.project_root
+    port   = params.port.value
+    base   = params.base_image.value
+    runner = params.runner_image.value
+
+    if root:
+        cargo_copy = f"COPY {root}Cargo.toml ./"
+        src_copy   = f"COPY {root}src ./src"
+    else:
+        cargo_copy = "COPY Cargo.toml ./"
+        src_copy   = "COPY src ./src"
+
+    builder = _lines(
+        f"FROM {base} AS builder",
+        "WORKDIR /app",
+        cargo_copy,
+        src_copy,
+        f"RUN {params.install_cmd.value}",
+    )
+    runner_lines = [
+        f"FROM {runner} AS runner",
+        "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*",
+        "WORKDIR /app",
+        "COPY --from=builder /app/server /app/server",
+        _ADDUSER_DEBIAN,
+        f"EXPOSE {port}",
+        "USER appuser",
+        _cmd(params.start_cmd.value),
+    ]
+    return builder + "\n\n" + _lines(*runner_lines)
+
+
+# ── Ruby 템플릿 ───────────────────────────────────────────────────────────────
+
+def render_ruby(params: BuildParams) -> str:
+    d      = params.detected
+    root   = d.project_root
+    port   = params.port.value
+    base   = params.base_image.value
+    runner = params.runner_image.value
+
+    if root:
+        gem_copy = f"COPY {root}Gemfile ./"
+        src_copy = f"COPY {root}. ."
+    else:
+        gem_copy = "COPY Gemfile ./"
+        src_copy = "COPY . ."
+
+    builder = _lines(
+        f"FROM {base} AS builder",
+        "WORKDIR /app",
+        "RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*",
+        gem_copy,
+        f"RUN {params.install_cmd.value}",
+        src_copy,
+    )
+    runner_lines = [
+        f"FROM {runner} AS runner",
+        "WORKDIR /app",
+        "COPY --from=builder /app ./",
+        _ADDUSER_DEBIAN,
+        _env({}, {"RACK_ENV": "production"}),
+        f"EXPOSE {port}",
+        "USER appuser",
+        _cmd(params.start_cmd.value),
+    ]
+    return builder + "\n\n" + _lines(*runner_lines)
+
+
 # ── Java 템플릿 (Gradle / Maven 공통) ────────────────────────────────────────
 
 def render_java(params: BuildParams) -> str:

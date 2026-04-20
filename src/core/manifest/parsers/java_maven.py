@@ -37,12 +37,15 @@ class JavaMavenManifestParser(BaseManifestParser):
     def _extract_java_version(content: str) -> str | None:
         try:
             root = ET.fromstring(content)
-            for tag in ("maven.compiler.source", "java.version"):
-                el = root.find(f".//*[local-name()='properties']/*[local-name()='{tag}']")
-                if el is not None and el.text:
-                    m = re.search(r"(\d+)", el.text)
-                    return m.group(1) if m else None
-        except ET.ParseError:
+            for elem in root.iter():
+                local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                if local == "properties":
+                    for child in elem:
+                        child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                        if child_local in ("maven.compiler.source", "java.version") and child.text:
+                            m = re.search(r"(\d+)", child.text)
+                            return m.group(1) if m else None
+        except Exception:
             pass
         return None
 
@@ -51,12 +54,19 @@ class JavaMavenManifestParser(BaseManifestParser):
         deps: list[str] = []
         try:
             root = ET.fromstring(content)
-            for dep in root.findall(".//*[local-name()='dependency']"):
-                g = dep.find("*[local-name()='groupId']")
-                a = dep.find("*[local-name()='artifactId']")
-                if g is not None and a is not None and g.text and a.text:
-                    deps.append(f"{g.text}:{a.text}")
-        except ET.ParseError:
+            for elem in root.iter():
+                local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                if local == "dependency":
+                    g_text = a_text = None
+                    for child in elem:
+                        child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                        if child_local == "groupId":
+                            g_text = child.text
+                        elif child_local == "artifactId":
+                            a_text = child.text
+                    if g_text and a_text:
+                        deps.append(f"{g_text}:{a_text}")
+        except Exception:
             pass
         return deps
 

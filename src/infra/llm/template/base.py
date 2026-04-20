@@ -209,6 +209,14 @@ def render_node_server(params: BuildParams) -> str:
         *_node_copy_src(params),
         _node_build_run(params),
     )
+    # runner CMD: node 직접 실행 (yarn/pnpm이 runner 이미지에 없을 수 있음)
+    start = params.start_cmd.value
+    if start and start[0] in ("yarn", "pnpm", "bun") and len(start) >= 3:
+        # "yarn run start" → package.json scripts.start 값을 node로 직접 실행
+        # 가장 안전한 fallback: node entry_point
+        ep = params.detected.entry_point or "index.js"
+        start = ["node", ep]
+
     runner_lines = [
         f"FROM {runner} AS runner",
         "WORKDIR /app",
@@ -219,7 +227,7 @@ def render_node_server(params: BuildParams) -> str:
         _env({}, {"NODE_ENV": "production"}),
         f"EXPOSE {port}",
         "USER appuser",
-        _cmd(params.start_cmd.value),
+        _cmd(start),
     ]
     return builder + "\n\n" + _lines(*runner_lines)
 
@@ -256,18 +264,24 @@ def render_static(params: BuildParams) -> str:
 
 def render_go(params: BuildParams) -> str:
     d      = params.detected
+    root   = d.project_root
     port   = params.port.value
     base   = params.base_image.value
     runner = params.runner_image.value
 
-    mod_copy = "COPY go.mod go.sum ./" if d.has_go_sum else "COPY go.mod ./"
+    if root:
+        mod_copy = f"COPY {root}go.mod {root}go.sum ./" if d.has_go_sum else f"COPY {root}go.mod ./"
+        src_copy = f"COPY {root}. ."
+    else:
+        mod_copy = "COPY go.mod go.sum ./" if d.has_go_sum else "COPY go.mod ./"
+        src_copy = "COPY . ."
 
     builder = _lines(
         f"FROM {base} AS builder",
         "WORKDIR /app",
         mod_copy,
         "RUN go mod download",
-        "COPY . .",
+        src_copy,
         f"RUN {params.build_cmd.value}",
     )
     runner_lines = [
@@ -288,14 +302,17 @@ def render_go(params: BuildParams) -> str:
 
 def render_java(params: BuildParams) -> str:
     d      = params.detected
+    root   = d.project_root
     port   = params.port.value
     base   = params.base_image.value
     runner = params.runner_image.value
 
+    src_copy = f"COPY {root}. ." if root else "COPY . ."
+
     builder = _lines(
         f"FROM {base} AS builder",
         "WORKDIR /app",
-        "COPY . .",
+        src_copy,
         f"RUN {params.install_cmd.value}",
     )
     runner_lines = [

@@ -6,19 +6,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.generators import BaseDockerfileGenerator
 from src.core.manifest.models import ManifestInfo
-from src.core.spec.models import BuildSpec
-from src.core.stack.detector import StackDetector
-from src.core.stack.root_detector import ProjectRootDetector
+from src.core.params.analyzer import Analyzer
+from src.core.params.rule_engine import RuleEngine
 from src.infra.docker.build_validator import DockerBuildValidator
 from src.infra.llm.agent.loop import AgentLoop
 from src.infra.llm.agent.retry import RetryLoop
 from src.infra.llm.agent.tools import DockerfileAgentTools
 from src.infra.llm.docker_hub_verifier import DockerHubVerifier
-from src.infra.llm.dockerfile_processing.cleaner import (
-    _ensure_from_first,
-    _remove_invalid_lines,
-    _sanitize_base_images,
-)
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
 from src.infra.llm.dockerfile_processing.ignore import (
     _remove_missing_optional_copy_sources,
@@ -31,31 +25,27 @@ from src.infra.llm.dockerfile_processing.stack_handlers import (
     apply_store_fixers,
 )
 from src.infra.llm.nova import NovaLLM
-from src.infra.llm.spec.generator import SpecGenerator
-from src.infra.llm.template_renderer import TemplateRenderer
+from src.infra.llm.template.selector import select
 from src.infra.linting.hadolint import HadolintValidator
 
 logger = logging.getLogger(__name__)
+
+_analyzer     = Analyzer()
+_rule_engine  = RuleEngine()
 
 
 class DockerfileGenerator(BaseDockerfileGenerator):
     def __init__(
         self,
         llm: NovaLLM,
-        spec_generator: SpecGenerator,
         hadolint: HadolintValidator,
         build_validator: DockerBuildValidator,
         verifier: DockerHubVerifier,
-        stack_detector: StackDetector,
-        root_detector: ProjectRootDetector,
     ) -> None:
-        self._llm = llm
-        self._spec_generator = spec_generator
-        self._hadolint = hadolint
+        self._llm             = llm
+        self._hadolint        = hadolint
         self._build_validator = build_validator
-        self._verifier = verifier
-        self._stack_detector = stack_detector
-        self._root_detector = root_detector
+        self._verifier        = verifier
 
     async def generate(
         self,
@@ -63,42 +53,67 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         tree: str,
         manifest: ManifestInfo,
     ) -> tuple[str, str, int]:
-        stack = self._stack_detector.detect(store)
-        project_root = self._root_detector.detect(store, stack)
-        logger.info(f"[DockerfileGenerator] stack={stack}, project_root='{project_root}'")
 
-        spec = await self._spec_generator.generate(manifest, tree, stack, project_root)
-        logger.info(f"[DockerfileGenerator] spec.detected_stack={spec.detected_stack}")
+        # ── 1. 결정론적 분석 ──────────────────────────────────────────────────
+        detected = _analyzer.analyze(store, manifest)
+        params   = _rule_engine.resolve(detected, store)
 
-        dockerfile = self._try_template(spec, store, stack)
+        # ── 2. 템플릿 경로 (알려진 스택 + unknown 없음) ───────────────────────
+        render_fn = select(params)
+        if render_fn is not None and not params.has_unknowns():
+            try:
+                dockerfile = render_fn(params)
+                dockerfile = _remove_unwanted_copy_sources(dockerfile)
+                dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
+                dockerignore = generate_dockerignore(store, detected.framework, dockerfile)
+                port = params.port.value
+                logger.info(
+                    "[DockerfileGenerator] template path: framework=%s standalone=%s",
+                    detected.framework, detected.standalone,
+                )
+                return dockerfile.strip(), dockerignore.strip(), port
+            except Exception as exc:
+                logger.warning(
+                    "[DockerfileGenerator] template render failed (%s), falling back to LLM", exc
+                )
 
-        if dockerfile is None:
-            tools_factory = DockerfileAgentTools(store, self._verifier)
-            tools = tools_factory.build()
+        # ── 3. LLM fallback (미지원 스택 or unknown params) ───────────────────
+        stack        = detected.framework
+        project_root = detected.project_root
+        logger.info(
+            "[DockerfileGenerator] LLM path: framework=%s unknowns=%s",
+            stack, params.unknown_fields(),
+        )
 
-            llm_with_tools = self._llm.client.bind_tools(tools)
-            agent_loop = AgentLoop(llm_with_tools)
-            retry_loop = RetryLoop(agent_loop, self._hadolint, self._build_validator)
+        tools_factory = DockerfileAgentTools(store, self._verifier)
+        tools         = tools_factory.build()
+        llm_with_tools = self._llm.client.bind_tools(tools)
+        agent_loop    = AgentLoop(llm_with_tools)
+        retry_loop    = RetryLoop(agent_loop, self._hadolint, self._build_validator)
 
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())),
-                HumanMessage(
-                    content=HUMAN_PROMPT.format(
-                        tree=tree,
-                        context="",
-                        detect_info=self._format_spec(spec),
-                    )
-                ),
-            ]
+        # LLM fallback용 spec 생성 (BuildParams에서 직접 조합)
+        from src.core.spec.models import BuildSpec
+        spec = self._params_to_spec(params, stack, project_root)
 
-            dockerfile = await retry_loop.run(
-                messages=messages,
-                tools=tools,
-                store=store,
-                stack=stack,
-                project_root=project_root,
-                spec=spec,
-            )
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())),
+            HumanMessage(
+                content=HUMAN_PROMPT.format(
+                    tree=tree,
+                    context="",
+                    detect_info=self._format_params(params),
+                )
+            ),
+        ]
+
+        dockerfile = await retry_loop.run(
+            messages=messages,
+            tools=tools,
+            store=store,
+            stack=stack,
+            project_root=project_root,
+            spec=spec,
+        )
 
         dockerfile = _remove_unwanted_copy_sources(dockerfile)
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
@@ -106,49 +121,57 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
 
+    # ── 헬퍼 ─────────────────────────────────────────────────────────────────
+
     @staticmethod
-    def _try_template(spec: BuildSpec, store: dict[str, str], stack: str | None) -> str | None:
-        """알려진 스택은 템플릿으로 렌더링, 실패하거나 미지원이면 None 반환(LLM 폴백)."""
-        renderer = TemplateRenderer()
-        if not renderer.can_render(spec.detected_stack):
-            return None
-        try:
-            dockerfile = renderer.render(spec, store)
-            dockerfile = apply_stack_fixers(dockerfile, stack)
-            dockerfile = apply_store_fixers(dockerfile, store, stack)
-            dockerfile = _sanitize_base_images(dockerfile)
-            dockerfile = _remove_invalid_lines(dockerfile)
-            dockerfile = _ensure_from_first(dockerfile)
-            dockerfile = dockerfile.strip()
-            logger.info("[DockerfileGenerator] template path: stack=%s", stack)
-            return dockerfile
-        except Exception as exc:
-            logger.warning(
-                "[DockerfileGenerator] template render failed (%s), falling back to LLM", exc
-            )
-            return None
+    def _params_to_spec(params, stack, project_root):
+        """LLM fallback용 최소 BuildSpec 생성 (RetryLoop 인터페이스 호환)."""
+        from src.core.spec.models import BuildSpec, Stage
+        return BuildSpec(
+            detected_stack=stack or "unknown",
+            stages=[
+                Stage(name="builder", base_image=params.base_image.value),
+                Stage(name="runner",  base_image=params.runner_image.value,
+                      expose_port=params.port.value),
+            ],
+            pkg_manager=params.detected.package_manager,
+            pkg_manager_install_cmd=params.install_cmd.value,
+            pkg_manager_build_cmd=params.build_cmd.value,
+            project_root=project_root,
+        )
+
+    @staticmethod
+    def _format_params(params) -> str:
+        import json
+        d = params.detected
+        summary = {
+            "framework":     d.framework,
+            "runtime":       d.runtime,
+            "package_manager": d.package_manager,
+            "project_root":  d.project_root,
+            "standalone":    d.standalone,
+            "install_cmd":   f"{params.install_cmd.value} ({params.install_cmd.confidence})",
+            "build_cmd":     f"{params.build_cmd.value} ({params.build_cmd.confidence})",
+            "start_cmd":     f"{params.start_cmd.value} ({params.start_cmd.confidence})",
+            "port":          f"{params.port.value} ({params.port.confidence})",
+        }
+        return (
+            "[분석된 빌드 파라미터]\n"
+            + json.dumps(summary, ensure_ascii=False, indent=2)
+            + "\n\n위 파라미터를 기반으로 Dockerfile을 생성하세요."
+        )
 
     @staticmethod
     def _build_stack_info() -> str:
         lines = []
         for name, config in STACK_PATTERNS.items():
-            detectors = config.get("detector", [])
+            detectors  = config.get("detector", [])
             secondaries = config.get("secondary", [])
             if detectors:
                 lines.append(f"- {name}: {detectors} (score: {config.get('score', 0)})")
             elif secondaries:
                 lines.append(f"- {name}: {secondaries} (fallback, score: {config.get('score', 0)})")
         return "\n".join(lines)
-
-    @staticmethod
-    def _format_spec(spec: BuildSpec) -> str:
-        import json
-        return (
-            f"[검증된 빌드 스펙]\n"
-            f"{json.dumps(spec.model_dump(), ensure_ascii=False, indent=2)}\n\n"
-            f"위 스펙을 기반으로 Dockerfile을 생성하세요. "
-            f"스펙과 실제 파일이 다르면 read_file/list_tree로 확인 후 실제를 우선하세요."
-        )
 
     @staticmethod
     def _extract_port(dockerfile: str, stack: Optional[str]) -> int:

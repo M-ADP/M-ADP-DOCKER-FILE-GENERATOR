@@ -35,6 +35,16 @@ _ROOT_INDICATORS = frozenset({
     "go.mod", "Cargo.toml", "Gemfile", "composer.json", "Pipfile",
 })
 
+# 프레임워크 → 해당 package.json에 반드시 있어야 하는 의존성
+_FRAMEWORK_KEY_DEP: dict[str, str] = {
+    "nextjs":      "next",
+    "nuxt":        "nuxt",
+    "astro":       "astro",
+    "svelte":      "@sveltejs/kit",
+    "vue":         "vue",
+    "vite-static": "vite",
+}
+
 _PYTHON_ENTRY_CANDIDATES = ("main.py", "app.py", "application.py", "run.py", "server.py", "wsgi.py", "asgi.py")
 _NODE_ENTRY_CANDIDATES   = ("index.js", "index.ts", "server.js", "server.ts", "app.js", "app.ts", "main.js", "main.ts")
 
@@ -44,10 +54,12 @@ class Analyzer:
         norm = {self._norm(k): v for k, v in store.items()}
         files = {Path(k).name for k in norm}
 
-        project_root = self._detect_root(norm)
-        pkg_jsons    = self._load_package_jsons(norm)
-        framework    = self._detect_framework(norm, files, pkg_jsons)
-        runtime      = _FRAMEWORK_RUNTIME.get(framework) if framework else None
+        pkg_jsons_with_paths = self._load_package_jsons_with_paths(norm)
+        pkg_jsons            = [p for _, p in pkg_jsons_with_paths]
+        framework            = self._detect_framework(norm, files, pkg_jsons)
+        runtime              = _FRAMEWORK_RUNTIME.get(framework) if framework else None
+        # 프레임워크 키 의존성이 있는 package.json 위치를 우선 사용 (모노레포 대응)
+        project_root = self._detect_root_for_framework(norm, framework, pkg_jsons_with_paths)
         pkg_manager, lockfile = self._detect_pkg_manager(norm, files, project_root)
         standalone   = self._detect_standalone(norm)
         req_file     = self._detect_req_file(norm, files, project_root)
@@ -99,6 +111,20 @@ class Analyzer:
         return min(candidates, key=candidates.get)  # type: ignore[arg-type]
 
     @staticmethod
+    def _load_package_jsons_with_paths(norm: dict[str, str]) -> list[tuple[str, dict]]:
+        result = []
+        for path, content in norm.items():
+            if Path(path).name != "package.json":
+                continue
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    result.append((path, data))
+            except json.JSONDecodeError:
+                pass
+        return result
+
+    @staticmethod
     def _load_package_jsons(norm: dict[str, str]) -> list[dict]:
         result = []
         for path, content in norm.items():
@@ -111,6 +137,29 @@ class Analyzer:
             except json.JSONDecodeError:
                 pass
         return result
+
+    def _detect_root_for_framework(
+        self,
+        norm: dict[str, str],
+        framework: str | None,
+        pkg_jsons_with_paths: list[tuple[str, dict]],
+    ) -> str:
+        """모노레포: 프레임워크 키 의존성이 있는 package.json 디렉토리를 project_root로 사용."""
+        key_dep = _FRAMEWORK_KEY_DEP.get(framework or "")
+        if key_dep and pkg_jsons_with_paths:
+            for path, pkg in pkg_jsons_with_paths:
+                all_deps = {
+                    **pkg.get("dependencies", {}),
+                    **pkg.get("devDependencies", {}),
+                }
+                if key_dep in all_deps:
+                    parent = str(Path(path).parent)
+                    root = "" if parent == "." else parent + "/"
+                    logger.info(
+                        "[Analyzer] monorepo root: '%s' (found '%s' in %s)", root, key_dep, path
+                    )
+                    return root
+        return self._detect_root(norm)
 
     def _detect_framework(
         self,

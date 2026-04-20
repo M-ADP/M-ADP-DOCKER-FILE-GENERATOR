@@ -14,6 +14,11 @@ from src.infra.llm.agent.loop import AgentLoop
 from src.infra.llm.agent.retry import RetryLoop
 from src.infra.llm.agent.tools import DockerfileAgentTools
 from src.infra.llm.docker_hub_verifier import DockerHubVerifier
+from src.infra.llm.dockerfile_processing.cleaner import (
+    _ensure_from_first,
+    _remove_invalid_lines,
+    _sanitize_base_images,
+)
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
 from src.infra.llm.dockerfile_processing.ignore import (
     _remove_missing_optional_copy_sources,
@@ -21,8 +26,13 @@ from src.infra.llm.dockerfile_processing.ignore import (
     generate_dockerignore,
 )
 from src.infra.llm.dockerfile_processing.prompts import HUMAN_PROMPT, SYSTEM_PROMPT
+from src.infra.llm.dockerfile_processing.stack_handlers import (
+    apply_stack_fixers,
+    apply_store_fixers,
+)
 from src.infra.llm.nova import NovaLLM
 from src.infra.llm.spec.generator import SpecGenerator
+from src.infra.llm.template_renderer import TemplateRenderer
 from src.infra.linting.hadolint import HadolintValidator
 
 logger = logging.getLogger(__name__)
@@ -60,38 +70,63 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         spec = await self._spec_generator.generate(manifest, tree, stack, project_root)
         logger.info(f"[DockerfileGenerator] spec.detected_stack={spec.detected_stack}")
 
-        tools_factory = DockerfileAgentTools(store, self._verifier)
-        tools = tools_factory.build()
+        dockerfile = self._try_template(spec, store, stack)
 
-        llm_with_tools = self._llm.client.bind_tools(tools)
-        agent_loop = AgentLoop(llm_with_tools)
-        retry_loop = RetryLoop(agent_loop, self._hadolint, self._build_validator)
+        if dockerfile is None:
+            tools_factory = DockerfileAgentTools(store, self._verifier)
+            tools = tools_factory.build()
 
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())),
-            HumanMessage(
-                content=HUMAN_PROMPT.format(
-                    tree=tree,
-                    context="",
-                    detect_info=self._format_spec(spec),
-                )
-            ),
-        ]
+            llm_with_tools = self._llm.client.bind_tools(tools)
+            agent_loop = AgentLoop(llm_with_tools)
+            retry_loop = RetryLoop(agent_loop, self._hadolint, self._build_validator)
 
-        dockerfile = await retry_loop.run(
-            messages=messages,
-            tools=tools,
-            store=store,
-            stack=stack,
-            project_root=project_root,
-            spec=spec,
-        )
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())),
+                HumanMessage(
+                    content=HUMAN_PROMPT.format(
+                        tree=tree,
+                        context="",
+                        detect_info=self._format_spec(spec),
+                    )
+                ),
+            ]
+
+            dockerfile = await retry_loop.run(
+                messages=messages,
+                tools=tools,
+                store=store,
+                stack=stack,
+                project_root=project_root,
+                spec=spec,
+            )
 
         dockerfile = _remove_unwanted_copy_sources(dockerfile)
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
         dockerignore = generate_dockerignore(store, stack, dockerfile)
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port
+
+    @staticmethod
+    def _try_template(spec: BuildSpec, store: dict[str, str], stack: str | None) -> str | None:
+        """알려진 스택은 템플릿으로 렌더링, 실패하거나 미지원이면 None 반환(LLM 폴백)."""
+        renderer = TemplateRenderer()
+        if not renderer.can_render(spec.detected_stack):
+            return None
+        try:
+            dockerfile = renderer.render(spec, store)
+            dockerfile = apply_stack_fixers(dockerfile, stack)
+            dockerfile = apply_store_fixers(dockerfile, store, stack)
+            dockerfile = _sanitize_base_images(dockerfile)
+            dockerfile = _remove_invalid_lines(dockerfile)
+            dockerfile = _ensure_from_first(dockerfile)
+            dockerfile = dockerfile.strip()
+            logger.info("[DockerfileGenerator] template path: stack=%s", stack)
+            return dockerfile
+        except Exception as exc:
+            logger.warning(
+                "[DockerfileGenerator] template render failed (%s), falling back to LLM", exc
+            )
+            return None
 
     @staticmethod
     def _build_stack_info() -> str:

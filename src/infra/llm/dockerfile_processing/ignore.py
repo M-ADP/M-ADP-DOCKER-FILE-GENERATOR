@@ -131,6 +131,7 @@ def _remove_missing_optional_copy_sources(
             if (
                 not source_normalized
                 or source_normalized == "."
+                or source_normalized.endswith("/.")  # COPY root/. . 패턴
                 or "*" in source_normalized
                 or "?" in source_normalized
                 or source.rstrip().endswith("/")

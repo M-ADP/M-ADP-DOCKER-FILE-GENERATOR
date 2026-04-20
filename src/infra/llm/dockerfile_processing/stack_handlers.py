@@ -82,10 +82,10 @@ def _move_user_to_end_of_stage(dockerfile: str) -> str:
 
 
 _NODE_INSTALL_PATTERN = re.compile(
-    r"RUN\s+.*\b(?:pnpm|npm|yarn)\s+install\b", re.IGNORECASE
+    r"RUN\s+.*\b(?:pnpm|npm|yarn)\s+install(?!\s+-g)\b", re.IGNORECASE
 )
 _COPY_SOURCE_PATTERN = re.compile(
-    r"COPY\s+(?:--\S+\s+)*(?!\s*--from)(?:\.|package\.json|requirements\.txt|Pipfile)",
+    r"COPY(?!\s+--from)\s+",
     re.IGNORECASE,
 )
 

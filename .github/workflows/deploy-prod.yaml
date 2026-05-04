@@ -1,0 +1,51 @@
+name: Deploy to Prod
+
+on:
+  push:
+    branches:
+      - 'prod-*'
+
+jobs:
+  call-prod:
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/prod.yaml@master
+    with:
+      deploy_repo: "M-ADP/M-ADP-ARGOCD"
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      PERSONAL_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+
+  notify-slack:
+    needs: call-prod
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Slack Notification
+        run: |
+          STATUS="${{ needs.call-prod.result }}"
+          if [ "$STATUS" = "success" ]; then
+            COLOR="#2eb886"
+            EMOJI="✅"
+          else
+            COLOR="#e01e5a"
+            EMOJI="❌"
+          fi
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"attachments\": [
+              {
+                \"color\": \"$COLOR\",
+                \"fields\": [
+                  {\"title\": \"Status\", \"value\": \"$EMOJI $STATUS\", \"short\": true},
+                  {\"title\": \"Repo\", \"value\": \"${{ github.repository }}\", \"short\": true},
+                  {\"title\": \"Branch\", \"value\": \"${{ github.head_ref || github.ref_name }}\", \"short\": true},
+                  {\"title\": \"Commit\", \"value\": \"${{ github.sha }}\", \"short\": false}
+                ]
+              }
+            ]
+          }" \
+          ${{ secrets.SLACK_WEBHOOK_URL }}

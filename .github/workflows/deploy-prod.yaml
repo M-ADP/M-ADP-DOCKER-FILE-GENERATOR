@@ -1,4 +1,4 @@
-name: Deploy to Prod
+name: Deploy to Prod-Serve
 
 on:
   push:
@@ -6,12 +6,12 @@ on:
       - 'prod-*'
 
 jobs:
-  call-prod:
+  call-prod-serve:
     permissions:
       contents: write
       packages: write
       pull-requests: write
-    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/prod.yaml@master
+    uses: M-ADP/M-ADP-GITHUB-ACTIONS/.github/workflows/prod-serve.yaml@master
     with:
       deploy_repo: "M-ADP/M-ADP-ARGOCD"
     secrets:
@@ -20,13 +20,13 @@ jobs:
       PERSONAL_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
 
   notify-slack:
-    needs: call-prod
+    needs: call-prod-serve
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Slack Notification
         run: |
-          STATUS="${{ needs.call-prod.result }}"
+          STATUS="${{ needs.call-prod-serve.result }}"
           if [ "$STATUS" = "success" ]; then
             COLOR="#2eb886"
             EMOJI="✅"

@@ -5,6 +5,7 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.generators import BaseDockerfileGenerator
+from src.core.llm import LLM
 from src.core.manifest.models import ManifestInfo
 from src.core.params.analyzer import Analyzer
 from src.core.params.rule_engine import RuleEngine
@@ -24,7 +25,6 @@ from src.infra.llm.dockerfile_processing.stack_handlers import (
     apply_stack_fixers,
     apply_store_fixers,
 )
-from src.infra.llm.nova import NovaLLM
 from src.infra.llm.template.selector import select
 from src.infra.linting.hadolint import HadolintValidator
 
@@ -37,7 +37,7 @@ _rule_engine  = RuleEngine()
 class DockerfileGenerator(BaseDockerfileGenerator):
     def __init__(
         self,
-        llm: NovaLLM,
+        llm: LLM,
         hadolint: HadolintValidator,
         build_validator: DockerBuildValidator,
         verifier: DockerHubVerifier,

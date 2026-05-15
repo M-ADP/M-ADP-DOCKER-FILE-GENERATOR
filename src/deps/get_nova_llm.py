@@ -1,5 +1,5 @@
-from src.infra.llm.nova import NovaLLM
+from src.infra.llm.gemini import GeminiLLM
 
 
-def get_nova_llm() -> NovaLLM:
-    return NovaLLM()
+def get_nova_llm() -> GeminiLLM:
+    return GeminiLLM()

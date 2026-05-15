@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.135.3",
     "langchain-aws>=1.4.3",
     "langchain-core>=0.3.0",
+    "langchain-google-genai>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.34.0",

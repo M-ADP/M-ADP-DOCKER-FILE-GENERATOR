@@ -223,6 +223,60 @@ def _fix_wildcard_copy(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+_VAULT_ENTRYPOINT_RUN = (
+    "RUN printf '#!/bin/sh\\n\\\n"
+    "[ -f /vault/secrets/app-secret ] && export $(cat /vault/secrets/app-secret | xargs)\\n\\\n"
+    "exec \"$@\"\\n' > /entrypoint.sh && chmod +x /entrypoint.sh"
+)
+_VAULT_ENTRYPOINT = 'ENTRYPOINT ["/entrypoint.sh"]'
+
+
+def inject_vault_entrypoint(dockerfile: str) -> str:
+    """마지막 런타임 스테이지에 Vault secret injection entrypoint를 삽입."""
+    if "/entrypoint.sh" in dockerfile:
+        return dockerfile
+
+    lines = dockerfile.split("\n")
+
+    last_from_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith("FROM "):
+            last_from_idx = i
+
+    if last_from_idx == -1:
+        return dockerfile
+
+    prefix = lines[: last_from_idx + 1]
+    stage_lines = lines[last_from_idx + 1 :]
+
+    vault_run_inserted = False
+    entrypoint_inserted = False
+    final_stage: list[str] = []
+
+    for line in stage_lines:
+        stripped = line.strip()
+
+        if not vault_run_inserted and stripped.startswith("USER "):
+            final_stage.append(_VAULT_ENTRYPOINT_RUN)
+            vault_run_inserted = True
+
+        if not entrypoint_inserted and stripped.startswith("CMD "):
+            if not vault_run_inserted:
+                final_stage.append(_VAULT_ENTRYPOINT_RUN)
+                vault_run_inserted = True
+            final_stage.append(_VAULT_ENTRYPOINT)
+            entrypoint_inserted = True
+
+        final_stage.append(line)
+
+    if not entrypoint_inserted:
+        if not vault_run_inserted:
+            final_stage.append(_VAULT_ENTRYPOINT_RUN)
+        final_stage.append(_VAULT_ENTRYPOINT)
+
+    return "\n".join(prefix + final_stage)
+
+
 def _merge_run_layers(dockerfile: str) -> str:
     lines = dockerfile.split("\n")
     merged_lines: list[str] = []

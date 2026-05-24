@@ -5,6 +5,7 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.generators import BaseDockerfileGenerator
+from src.core.llm import LLM
 from src.core.manifest.models import ManifestInfo
 from src.core.params.analyzer import Analyzer
 from src.core.params.rule_engine import RuleEngine
@@ -14,6 +15,7 @@ from src.infra.llm.agent.retry import RetryLoop
 from src.infra.llm.agent.tools import DockerfileAgentTools
 from src.infra.llm.docker_hub_verifier import DockerHubVerifier
 from src.infra.llm.dockerfile_processing.constants import STACK_PATTERNS
+from src.infra.llm.dockerfile_processing.cleaner import inject_vault_entrypoint
 from src.infra.llm.dockerfile_processing.ignore import (
     _remove_missing_optional_copy_sources,
     _remove_unwanted_copy_sources,
@@ -24,7 +26,6 @@ from src.infra.llm.dockerfile_processing.stack_handlers import (
     apply_stack_fixers,
     apply_store_fixers,
 )
-from src.infra.llm.nova import NovaLLM
 from src.infra.llm.template.selector import select
 from src.infra.linting.hadolint import HadolintValidator
 
@@ -37,7 +38,7 @@ _rule_engine  = RuleEngine()
 class DockerfileGenerator(BaseDockerfileGenerator):
     def __init__(
         self,
-        llm: NovaLLM,
+        llm: LLM,
         hadolint: HadolintValidator,
         build_validator: DockerBuildValidator,
         verifier: DockerHubVerifier,
@@ -65,6 +66,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
                 dockerfile = render_fn(params)
                 dockerfile = _remove_unwanted_copy_sources(dockerfile)
                 dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
+                dockerfile = inject_vault_entrypoint(dockerfile)
                 dockerignore = generate_dockerignore(store, detected.framework, dockerfile)
                 port = params.port.value
                 logger.info(
@@ -117,6 +119,7 @@ class DockerfileGenerator(BaseDockerfileGenerator):
 
         dockerfile = _remove_unwanted_copy_sources(dockerfile)
         dockerfile = _remove_missing_optional_copy_sources(dockerfile, store)
+        dockerfile = inject_vault_entrypoint(dockerfile)
         dockerignore = generate_dockerignore(store, stack, dockerfile)
         port = self._extract_port(dockerfile, stack)
         return dockerfile, dockerignore, port

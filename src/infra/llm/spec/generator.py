@@ -5,16 +5,16 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from src.core.llm import LLM
 from src.core.manifest.models import ManifestInfo
 from src.core.spec.models import BuildSpec
-from src.infra.llm.nova import NovaLLM
 from src.infra.llm.spec.prompts import SPEC_HUMAN_PROMPT, SPEC_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
 class SpecGenerator:
-    def __init__(self, llm: NovaLLM) -> None:
+    def __init__(self, llm: LLM) -> None:
         self._llm = llm
 
     async def generate(

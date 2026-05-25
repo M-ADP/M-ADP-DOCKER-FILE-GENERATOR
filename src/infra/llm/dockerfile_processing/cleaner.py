@@ -224,8 +224,12 @@ def _fix_wildcard_copy(dockerfile: str) -> str:
 
 
 _VAULT_ENTRYPOINT_RUN = (
-    "RUN printf '#!/bin/sh\\n\\\n"
-    "[ -f /vault/secrets/app-secret ] && export $(cat /vault/secrets/app-secret | xargs)\\n\\\n"
+    "RUN printf '#!/bin/sh\\n"
+    "if [ -f /vault/secrets/app-secret ]; then\\n"
+    "  set -a\\n"
+    "  . /vault/secrets/app-secret\\n"
+    "  set +a\\n"
+    "fi\\n"
     "exec \"$@\"\\n' > /entrypoint.sh && chmod +x /entrypoint.sh"
 )
 _VAULT_ENTRYPOINT = 'ENTRYPOINT ["/entrypoint.sh"]'

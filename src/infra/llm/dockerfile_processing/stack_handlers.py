@@ -165,6 +165,47 @@ def _fix_pnpm_without_corepack(dockerfile: str) -> str:
     return "\n".join(result)
 
 
+def _fix_pnpm_v10_dangerously_allow_builds(dockerfile: str) -> str:
+    """pnpm v10에서 native build scripts 차단 방지.
+
+    pnpm v10 기본값: 모든 패키지 빌드 스크립트 차단 → ERR_PNPM_IGNORED_BUILDS
+    Docker trusted 환경에서는 dangerouslyAllowAllBuilds=true 설정이 필요하다.
+    이미 설정된 경우 또는 pnpm을 사용하지 않는 경우 skip.
+    """
+    if "pnpm" not in dockerfile.lower():
+        return dockerfile
+    if "dangerouslyAllowAllBuilds" in dockerfile:
+        return dockerfile
+
+    lines = dockerfile.split("\n")
+    result: list[str] = []
+    stage_fixed = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("FROM "):
+            stage_fixed = False
+        if (
+            not stage_fixed
+            and stripped.startswith("RUN")
+            and re.search(r"\bpnpm\s+install\b", stripped, re.IGNORECASE)
+        ):
+            indent = line[: len(line) - len(line.lstrip())]
+            fixed = re.sub(
+                r"^(RUN\s+)",
+                r'\1echo "dangerouslyAllowAllBuilds=true" >> .npmrc && ',
+                stripped,
+                count=1,
+            )
+            result.append(indent + fixed)
+            stage_fixed = True
+            logger.info("[StackFixer] added dangerouslyAllowAllBuilds to pnpm install RUN")
+            continue
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def _fix_yarn_frozen_lockfile(dockerfile: str) -> str:
     """yarn install --frozen-lockfile → yarn install --immutable 교정.
 
@@ -498,6 +539,7 @@ _UNIVERSAL_FIXERS: list[Callable[[str], str]] = [
     _fix_serve_not_installed,        # CMD ["serve",...] 있는데 npm install -g serve 없으면 추가 (USER 이동 전에 먼저)
     _fix_node_install_before_copy,   # npm/pnpm/yarn install 전에 COPY 없으면 'COPY . .' 삽입
     _fix_pnpm_without_corepack,      # pnpm 사용하는데 corepack enable 없으면 삽입 (exit code 127 방지)
+    _fix_pnpm_v10_dangerously_allow_builds,  # pnpm v10 native build 차단 방지 (ERR_PNPM_IGNORED_BUILDS)
     _move_user_to_end_of_stage,      # USER <non-root>를 스테이지 끝(CMD 앞)으로 이동 → 모든 RUN이 root 실행
     _fix_alpine_adduser_home,        # adduser -S에 -H 추가 → /home 생성 없이 유저 생성
     _fix_yarn_frozen_lockfile,       # Yarn Berry에서 --frozen-lockfile → --immutable 교정

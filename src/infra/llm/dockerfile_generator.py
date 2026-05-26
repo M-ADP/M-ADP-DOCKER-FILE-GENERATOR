@@ -53,6 +53,8 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         store: dict[str, str],
         tree: str,
         manifest: ManifestInfo,
+        feedback: str = "",
+        prev_dockerfile: str = "",
     ) -> tuple[str, str, int]:
 
         # ── 1. 결정론적 분석 ──────────────────────────────────────────────────
@@ -97,12 +99,13 @@ class DockerfileGenerator(BaseDockerfileGenerator):
         from src.core.spec.models import BuildSpec
         spec = self._params_to_spec(params, stack, project_root)
 
+        context = self._build_feedback_context(feedback, prev_dockerfile)
         messages = [
             SystemMessage(content=SYSTEM_PROMPT.format(stack_info=self._build_stack_info())),
             HumanMessage(
                 content=HUMAN_PROMPT.format(
                     tree=tree,
-                    context="",
+                    context=context,
                     detect_info=self._format_params(params),
                 )
             ),
@@ -175,6 +178,18 @@ class DockerfileGenerator(BaseDockerfileGenerator):
             elif secondaries:
                 lines.append(f"- {name}: {secondaries} (fallback, score: {config.get('score', 0)})")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_feedback_context(feedback: str, prev_dockerfile: str) -> str:
+        if not feedback and not prev_dockerfile:
+            return ""
+        parts = []
+        if prev_dockerfile:
+            parts.append(f"[이전 Dockerfile]\n```\n{prev_dockerfile.strip()}\n```")
+        if feedback:
+            parts.append(f"[빌드 오류]\n{feedback.strip()}")
+        parts.append("위 오류를 분석하여 수정된 Dockerfile을 생성하세요.")
+        return "\n\n".join(parts) + "\n\n"
 
     @staticmethod
     def _extract_port(dockerfile: str, stack: Optional[str]) -> int:

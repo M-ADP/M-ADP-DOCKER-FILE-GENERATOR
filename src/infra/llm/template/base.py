@@ -63,7 +63,12 @@ def _node_copy_src(params: BuildParams) -> list[str]:
 
 def _node_build_run(params: BuildParams) -> str:
     """install + build 를 하나의 RUN으로."""
-    cmds = [params.install_cmd.value]
+    cmds = []
+    if params.detected.package_manager == "pnpm":
+        # pnpm v10은 기본적으로 모든 native build scripts를 차단한다.
+        # Docker trusted 환경에서는 dangerouslyAllowAllBuilds=true가 필요.
+        cmds.append('echo "dangerouslyAllowAllBuilds=true" >> .npmrc')
+    cmds.append(params.install_cmd.value)
     if params.build_cmd.value:
         cmds.append(params.build_cmd.value)
     return "RUN " + " && \\\n    ".join(cmds)

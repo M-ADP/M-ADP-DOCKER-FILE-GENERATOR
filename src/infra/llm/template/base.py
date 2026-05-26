@@ -36,6 +36,18 @@ def _run(*cmds: str | None) -> str:
 
 # ── Node 공통 헬퍼 ────────────────────────────────────────────────────────────
 
+# pnpm v10+에서 기본 native build 차단(ERR_PNPM_IGNORED_BUILDS) 대응.
+# package.json의 pnpm.onlyBuiltDependencies를 모든 의존성으로 설정하여
+# sharp, unrs-resolver 등의 postinstall 스크립트 실행을 허용한다.
+_PNPM_ALLOW_BUILDS_CMD = (
+    "node -e \"const fs=require('fs'),"
+    "p=JSON.parse(fs.readFileSync('package.json','utf8')),"
+    "d=Object.keys({...(p.dependencies||{}),...(p.devDependencies||{})});"
+    "p.pnpm=Object.assign({},p.pnpm,{onlyBuiltDependencies:d});"
+    "fs.writeFileSync('package.json',JSON.stringify(p,null,2))\""
+)
+
+
 def _node_copy_src(params: BuildParams) -> list[str]:
     """builder 스테이지용 COPY 라인 목록 (캐시 레이어 → 소스 두 단계)."""
     d    = params.detected
@@ -65,9 +77,7 @@ def _node_build_run(params: BuildParams) -> str:
     """install + build 를 하나의 RUN으로."""
     cmds = []
     if params.detected.package_manager == "pnpm":
-        # pnpm v10은 기본적으로 모든 native build scripts를 차단한다.
-        # Docker trusted 환경에서는 dangerouslyAllowAllBuilds=true가 필요.
-        cmds.append('echo "dangerouslyAllowAllBuilds=true" >> .npmrc')
+        cmds.append(_PNPM_ALLOW_BUILDS_CMD)
     cmds.append(params.install_cmd.value)
     if params.build_cmd.value:
         cmds.append(params.build_cmd.value)

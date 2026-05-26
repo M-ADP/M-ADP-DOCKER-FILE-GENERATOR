@@ -167,9 +167,12 @@ CMD ["java", "-jar", "/app.jar"]
   - COPY 시 `.yarnrc.yml`, `.yarn/releases/`, `yarn.lock` 반드시 포함
 - yarn.lock만 있고 .yarnrc.yml이 없으면 Yarn Classic: `RUN npm install -g yarn` 후 `yarn install --frozen-lockfile`
 - pnpm-lock.yaml이 있으면 (두 가지 중 하나 선택):
-  - **pnpm v10 필수**: pnpm v10은 기본적으로 모든 native build scripts(sharp, unrs-resolver 등)를 차단. 반드시 `.npmrc`에 `dangerouslyAllowAllBuilds=true`를 추가할 것
-  - package.json에 `"packageManager": "pnpm@x.y.z"` 필드가 있으면: `RUN echo "dangerouslyAllowAllBuilds=true" >> .npmrc && corepack enable && pnpm install --frozen-lockfile`
-  - 없으면: `RUN echo "dangerouslyAllowAllBuilds=true" >> .npmrc && npm install -g pnpm && pnpm install --frozen-lockfile`
+  - **pnpm v10 필수**: pnpm v10은 기본적으로 모든 native build scripts(sharp, unrs-resolver 등)를 차단(ERR_PNPM_IGNORED_BUILDS). pnpm install 전에 반드시 아래 node 명령으로 `package.json`의 `pnpm.onlyBuiltDependencies`를 설정할 것:
+    ```
+    node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('package.json','utf8')),d=Object.keys({...(p.dependencies||{}),...(p.devDependencies||{})});p.pnpm=Object.assign({},p.pnpm,{onlyBuiltDependencies:d});fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
+    ```
+  - package.json에 `"packageManager": "pnpm@x.y.z"` 필드가 있으면: `RUN <위 node 명령> && corepack enable && pnpm install --frozen-lockfile`
+  - 없으면: `RUN <위 node 명령> && npm install -g pnpm && pnpm install --frozen-lockfile`
   - **`corepack prepare pnpm@latest --destination=...` 절대 금지** — `--destination`은 존재하지 않는 플래그
 - bun.lockb가 있으면: `RUN npm install -g bun` 후 `bun install --frozen-lockfile`
 - **package-lock.json이 없으면 npm ci 사용 금지** — 해당 lockfile의 패키지 매니저를 사용할 것
@@ -292,7 +295,7 @@ CMD ["java", "-jar", "/app.jar"]
 - **.yarnrc.yml 있을 때 `yarn install --frozen-lockfile` 사용 금지** → `yarn install --immutable` 사용
 - **`corepack prepare --destination` 사용 금지** — 존재하지 않는 플래그. pnpm은 `corepack enable && pnpm install --frozen-lockfile` 또는 `npm install -g pnpm && pnpm install --frozen-lockfile` 사용
 - **corepack enable 없이 `pnpm install` 직접 실행 금지** — node:22-alpine에 pnpm 미설치, exit code 127 발생. 반드시 같은 RUN에 `corepack enable &&` 또는 `npm install -g pnpm &&` 선행
-- **pnpm install 전 `dangerouslyAllowAllBuilds=true` 설정 누락 금지** — pnpm v10에서 sharp, unrs-resolver 등 native module 빌드 스크립트가 ERR_PNPM_IGNORED_BUILDS로 차단됨. 반드시 `echo "dangerouslyAllowAllBuilds=true" >> .npmrc &&` 선행
+- **pnpm install 전 onlyBuiltDependencies 설정 누락 금지** — pnpm v10에서 sharp, unrs-resolver 등 native module 빌드 스크립트가 ERR_PNPM_IGNORED_BUILDS로 차단됨. 반드시 node 명령으로 `package.json`의 `pnpm.onlyBuiltDependencies`를 모든 의존성으로 설정 후 pnpm install 실행
 - **node-static/vite-static에서 nginx 사용 금지** → 반드시 `node:22-alpine` + `serve` 사용
 - **alpine + apk add nginx 패턴 금지** → nginx가 필요하면 `nginx:alpine` 이미지 사용
 - **nginx CMD에 `-c /path/nginx.conf` 사용 금지** → nginx.conf 파일이 이미지에 없으면 런타임 에러

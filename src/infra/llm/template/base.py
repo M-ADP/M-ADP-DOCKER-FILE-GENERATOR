@@ -85,10 +85,11 @@ def render_python(params: BuildParams) -> str:
     base     = params.base_image.value
     runner   = params.runner_image.value
 
+    req_copy = f"COPY {root}{req} ./" if d.req_file else None
     builder = _lines(
         f"FROM {base} AS builder",
         "WORKDIR /app",
-        f"COPY {root}{req} ./",
+        req_copy,
         f"RUN {params.install_cmd.value}",
         f"COPY {root}. ." if root else "COPY . .",
     )

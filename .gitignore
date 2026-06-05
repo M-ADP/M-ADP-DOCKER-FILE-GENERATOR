@@ -67,3 +67,6 @@ logs/
 .env
 
 /agent
+
+# Local test fixtures
+.test-project/

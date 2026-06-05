@@ -10,8 +10,14 @@ class PythonManifestParser(BaseManifestParser):
     def __init__(self, port_detector: PortDetector) -> None:
         self._port_detector = port_detector
 
+    _MANIFEST_FILES = ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg")
+    _ENTRY_CANDIDATES = frozenset(("main.py", "app.py", "wsgi.py", "asgi.py", "server.py", "run.py"))
+
     def can_handle(self, store: dict[str, str]) -> bool:
-        return self._has_file(store, "requirements.txt", "pyproject.toml", "Pipfile")
+        from pathlib import Path
+        if self._has_file(store, *self._MANIFEST_FILES):
+            return True
+        return any(Path(p).name in self._ENTRY_CANDIDATES for p in store)
 
     def parse(self, store: dict[str, str]) -> ManifestInfo:
         runtime_version = self._extract_python_version(store)
@@ -73,11 +79,9 @@ class PythonManifestParser(BaseManifestParser):
 
         return []
 
-    @staticmethod
-    def _find_entry_point(store: dict[str, str]) -> str | None:
-        candidates = ("main.py", "app.py", "wsgi.py", "asgi.py", "server.py")
+    def _find_entry_point(self, store: dict[str, str]) -> str | None:
+        from pathlib import Path
         for path in store.keys():
-            from pathlib import Path
-            if Path(path).name in candidates:
+            if Path(path).name in self._ENTRY_CANDIDATES:
                 return path
         return None

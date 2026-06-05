@@ -201,6 +201,8 @@ class Analyzer:
         is_python = has_file("requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg")
         if not is_python:
             is_python = any(Path(p).name in _PYTHON_ENTRY_CANDIDATES for p in files)
+        if not is_python:
+            is_python = any(f.endswith(".py") for f in files)
         if is_python:
             content_all = " ".join(norm.values()).lower()
             if "fastapi" in content_all:

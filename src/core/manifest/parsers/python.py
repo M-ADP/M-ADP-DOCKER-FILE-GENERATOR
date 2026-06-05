@@ -17,7 +17,9 @@ class PythonManifestParser(BaseManifestParser):
         from pathlib import Path
         if self._has_file(store, *self._MANIFEST_FILES):
             return True
-        return any(Path(p).name in self._ENTRY_CANDIDATES for p in store)
+        if any(Path(p).name in self._ENTRY_CANDIDATES for p in store):
+            return True
+        return any(p.endswith(".py") for p in store)
 
     def parse(self, store: dict[str, str]) -> ManifestInfo:
         runtime_version = self._extract_python_version(store)

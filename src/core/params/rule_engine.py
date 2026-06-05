@@ -198,7 +198,10 @@ class RuleEngine:
             return RuleResult(["node", ".output/server/index.mjs"], "certain", "rule:nuxt")
 
         if fw == "python-fastapi":
-            module = Path(d.entry_point).stem if d.entry_point else "main"
+            if d.entry_point:
+                module = str(Path(d.entry_point).with_suffix("")).replace("/", ".")
+            else:
+                module = "main"
             port   = _DEFAULT_PORTS.get(fw, 8000)
             return RuleResult(
                 ["uvicorn", f"{module}:app", "--host", "0.0.0.0", "--port", str(port)],

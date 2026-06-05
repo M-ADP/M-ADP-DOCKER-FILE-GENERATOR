@@ -198,7 +198,10 @@ class Analyzer:
             return "node-server"
 
         # Python 스택
-        if has_file("requirements.txt", "pyproject.toml", "Pipfile"):
+        is_python = has_file("requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg")
+        if not is_python:
+            is_python = any(Path(p).name in _PYTHON_ENTRY_CANDIDATES for p in files)
+        if is_python:
             content_all = " ".join(norm.values()).lower()
             if "fastapi" in content_all:
                 return "python-fastapi"
@@ -292,6 +295,12 @@ class Analyzer:
             else _NODE_ENTRY_CANDIDATES
         )
         for c in candidates:
-            if f"{root}{c}" in norm or c in files:
+            # 프로젝트 루트에 바로 있으면 파일명만 반환
+            if f"{root}{c}" in norm:
                 return c
+            # 서브디렉토리에 있으면 project_root 기준 상대 경로 반환
+            matches = [p for p in norm if p.startswith(root) and Path(p).name == c]
+            if matches:
+                shallowest = min(matches, key=lambda x: x.count("/"))
+                return shallowest[len(root):]
         return None

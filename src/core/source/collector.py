@@ -50,11 +50,26 @@ class SourceCollector:
                     self.security_guard.validate_source(content, name)
                     store[name] = content
 
+                store = self._strip_common_prefix(store)
                 logger.info(f"[SourceCollector] extracted {len(store)} files")
                 return store
 
         except tarfile.TarError as e:
             raise InvalidArchiveError() from e
+
+    @staticmethod
+    def _strip_common_prefix(store: dict[str, str]) -> dict[str, str]:
+        """GitHub 아카이브의 최상위 공통 디렉토리 접두사를 제거."""
+        if not store:
+            return store
+        top_dirs = {Path(p).parts[0] for p in store if Path(p).parts}
+        if len(top_dirs) != 1:
+            return store
+        prefix = top_dirs.pop() + "/"
+        stripped = {p[len(prefix):]: v for p, v in store.items() if p.startswith(prefix)}
+        if len(stripped) != len(store):
+            return store
+        return stripped
 
     def build_tree(self, store: dict[str, str]) -> str:
         """파일 경로 목록을 트리 형식 문자열로 변환.

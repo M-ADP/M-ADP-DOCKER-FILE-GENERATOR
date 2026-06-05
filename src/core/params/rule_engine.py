@@ -161,6 +161,15 @@ class RuleEngine:
         if pkg == "composer":
             return RuleResult("composer install --no-dev", "certain", "file:composer.json")
 
+        if d.framework and "python" in d.framework:
+            if d.req_file:
+                return RuleResult(f"pip install --no-cache-dir -r {d.req_file}", "inferred", "rule:python-default")
+            # req 파일 없음 — 프레임워크별 최소 패키지
+            if "fastapi" in d.framework:
+                return RuleResult("pip install --no-cache-dir fastapi uvicorn", "inferred", "rule:python-fastapi-min")
+            if "flask" in d.framework:
+                return RuleResult("pip install --no-cache-dir flask gunicorn", "inferred", "rule:python-flask-min")
+            return RuleResult("pip install --no-cache-dir -r requirements.txt", "inferred", "rule:python-default")
         return RuleResult("npm install", "inferred", "rule:default")
 
     @staticmethod
